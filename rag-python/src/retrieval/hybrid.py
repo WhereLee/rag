@@ -31,24 +31,31 @@ def _query_embedder():
 
 
 def _vector_search(qvec: np.ndarray, top_n: int,
-                   exclude_types: tuple = ()) -> List[Dict]:
+                   exclude_types: tuple = (),
+                   user_id: int | None = None) -> List[Dict]:
     col = config.VECTOR_COLUMN   # E1 实验列切换，取值已在 config 白名单校验
     type_filter = ""
     if exclude_types:
         type_filter = "AND c.chunk_type != ALL(%s)"
+    # 多租户过滤：只查当前用户可见文档的 chunk
+    user_filter = ""
+    if user_id is not None:
+        user_filter = "AND d.id IN (SELECT document_id FROM kb_user_document WHERE user_id = %s)"
     from pgvector.psycopg import register_vector
     with pg_store.connect() as conn:
         register_vector(conn)
         params = [qvec]
         if exclude_types:
             params.append(list(exclude_types))
+        if user_id is not None:
+            params.append(user_id)
         params += [qvec, top_n]
         cur = conn.execute(
             f"""SELECT c.id, c.content, c.chunk_type, c.page_no, c.document_id,
                       1 - (c.{col} <=> %s::vector) AS score,
                       d.filename AS doc_name
                FROM kb_chunk c JOIN kb_document d ON d.id = c.document_id
-               WHERE c.status = 1 AND c.{col} IS NOT NULL {type_filter}
+               WHERE c.status = 1 AND c.{col} IS NOT NULL {type_filter} {user_filter}
                ORDER BY c.{col} <=> %s::vector LIMIT %s""",
             tuple(params))
         return [dict(r) for r in cur.fetchall()]
@@ -74,33 +81,35 @@ def _rrf(rank_lists: List[List[int]], k: int) -> List[tuple[int, float]]:
 
 
 def hybrid_search(query: str, top_k: int = 0, use_rerank: bool = True,
-                  exclude_types: tuple = ()) -> Dict:
+                  exclude_types: tuple = (), user_id: int | None = None) -> Dict:
     """
     返回 {hits:[{chunk_id,content,score,...}], low_confidence, stage_ms, reranked}
     exclude_types：E5 实验用，排除指定 chunk 类型（如 ("table","image")）
+    user_id: 多租户过滤。传入时只检索该用户可见文档。
     """
     top_k = top_k or config.FINAL_TOP_K
     stage_ms: Dict[str, int] = {}
 
     with span("rag.hybrid_search", query_len=len(query), top_k=top_k,
-              vector_column=config.VECTOR_COLUMN):
-        return _hybrid_search_inner(query, top_k, use_rerank, stage_ms, exclude_types)
+              vector_column=config.VECTOR_COLUMN, user_id=user_id):
+        return _hybrid_search_inner(query, top_k, use_rerank, stage_ms, exclude_types, user_id)
 
 
 def _hybrid_search_inner(query: str, top_k: int, use_rerank: bool,
                          stage_ms: Dict[str, int],
-                         exclude_types: tuple = ()) -> Dict:
+                         exclude_types: tuple = (),
+                         user_id: int | None = None) -> Dict:
     # 1. 向量路
     t0 = time.perf_counter()
     qvec = _query_embedder().encode_query(query)
     stage_ms["encode"] = int((time.perf_counter() - t0) * 1000)
     t0 = time.perf_counter()
-    vec_hits = _vector_search(qvec, config.VECTOR_TOP_K, exclude_types)
+    vec_hits = _vector_search(qvec, config.VECTOR_TOP_K, exclude_types, user_id)
     stage_ms["vector"] = int((time.perf_counter() - t0) * 1000)
 
     # 2. BM25 路
     t0 = time.perf_counter()
-    bm_hits = bm25_index.search(query, config.BM25_TOP_K, exclude_types)
+    bm_hits = bm25_index.search(query, config.BM25_TOP_K, exclude_types, user_id)
     stage_ms["bm25"] = int((time.perf_counter() - t0) * 1000)
 
     # 3. RRF 融合

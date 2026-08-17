@@ -1,8 +1,11 @@
 """
 MCP Server（对外集成定位）：知识库工具暴露给任意外部 MCP Client。
 
+多租户：每个 tool 增加 user_id 参数，用于检索隔离。
+user_id=None 时全局访问（admin）。
+
 设计决策（架构文档 §8.3）：项目内部 Agent 直调函数，不走 MCP；
-MCP 的价值是"任何兼容 Client（IDE Agent 等）可直接接入本知识库"。
+MCP 的价值是“任何兼容 Client（IDE Agent 等）可直接接入本知识库”。
 
 启动：python -m mcp_server.server          （stdio，从 src 目录或 src 在 sys.path 时）
       python -m mcp_server.server --sse    （SSE，端口 8091）
@@ -24,17 +27,18 @@ mcp = MCPServer("rag-knowledge-base",
 
 
 @mcp.tool()
-def search_knowledge(query: str, top_k: int = 8) -> str:
+def search_knowledge(query: str, top_k: int = 8, user_id: int | None = None) -> str:
     """在文档知识库中检索与查询相关的内容片段。
 
     Args:
         query: 检索查询文本
         top_k: 返回结果数量（默认 8）
+        user_id: 用户 ID（多租户隔离；不传则全局访问）
     Returns:
         JSON 格式的检索结果（含来源文档、页码、相关度分数）
     """
     from retrieval.hybrid import hybrid_search
-    result = hybrid_search(query, top_k=top_k)
+    result = hybrid_search(query, top_k=top_k, user_id=user_id)
     return json.dumps({
         "hits": [{**h, "content": h["content"][:600]} for h in result["hits"]],
         "low_confidence": result["low_confidence"],
@@ -42,16 +46,17 @@ def search_knowledge(query: str, top_k: int = 8) -> str:
 
 
 @mcp.tool()
-def ask_knowledge(query: str) -> str:
+def ask_knowledge(query: str, user_id: int | None = None) -> str:
     """向文档知识库提问，得到带引用标注的完整回答（走完整问答管线）。
 
     Args:
         query: 用户问题
+        user_id: 用户 ID（多租户隔离；不传则全局访问）
     Returns:
         JSON：answer（带 [n] 引用标记）+ citations（来源文档/页码）
     """
     from agent.qa_service import ask
-    r = ask(query)
+    r = ask(query, user_id=user_id)
     return json.dumps({
         "answer": r["answer"],
         "citations": r["citations"],
@@ -60,10 +65,14 @@ def ask_knowledge(query: str) -> str:
 
 
 @mcp.tool()
-def list_documents() -> str:
-    """列出知识库中已入库的全部文档及其状态。"""
+def list_documents(user_id: int | None = None) -> str:
+    """列出知识库中已入库的全部文档及其状态。
+
+    Args:
+        user_id: 用户 ID（多租户过滤；不传则列出全部）
+    """
     from ingest.sync_service import list_documents as do_list
-    docs = do_list()
+    docs = do_list(user_id=user_id)
     for d in docs:
         d["created_at"] = str(d["created_at"])
     return json.dumps(docs, ensure_ascii=False, default=str)

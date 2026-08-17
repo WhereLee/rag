@@ -123,7 +123,7 @@ def run_eval(name: str = "", regression_only: bool = False,
     def _ask(qtext: str) -> Dict:
         if engine == "agent":
             return run_agent_eval(qtext)
-        return ask(qtext, top_k=top_k)
+        return ask(qtext, top_k=top_k)   # user_id=None → 全量检索（评估用）
 
     def _process_one(q) -> Dict:
         """处理单个问题（线程安全）。返回 {dim, scores}。"""
@@ -131,7 +131,8 @@ def run_eval(name: str = "", regression_only: bool = False,
         keywords = (q.get("meta") or {}).get("evidence_keywords", [])
         result = hybrid_search(q["question"], top_k=top_k,
                                exclude_types=exclude_types,
-                               use_rerank=use_rerank)
+                               use_rerank=use_rerank,
+                               user_id=None)   # 评估场景全量访问
         hits = result["hits"]
         hit_ids = [h["chunk_id"] for h in hits]
         contents = _load_chunk_contents(hit_ids)

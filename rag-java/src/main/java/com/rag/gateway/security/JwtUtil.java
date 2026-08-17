@@ -23,10 +23,36 @@ public final class JwtUtil {
     public String issue(String username, String role) {
         String header = b64("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
         long exp = System.currentTimeMillis() + ttlMillis;
-        String payloadJson = "{\"sub\":\"" + username + "\",\"role\":\"" + role + "\",\"exp\":" + exp + "}";
+        // 安全加固：对 username/role 做 JSON 转义，防止注入
+        String payloadJson = "{\"sub\":\"" + jsonEscape(username)
+                + "\",\"role\":\"" + jsonEscape(role)
+                + "\",\"exp\":" + exp + "}";
         String payload = b64(payloadJson);
         String sig = sign(header + "." + payload);
         return header + "." + payload + "." + sig;
+    }
+
+    /** JSON 字符串转义：防止 "、\、控制字符破坏 payload 结构。 */
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
     }
 
     /** 校验并返回载荷 JSON；失败返回 null。 */

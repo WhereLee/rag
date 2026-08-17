@@ -1,9 +1,10 @@
 """
 入库编排：文件 → 解析路由 → 切块 → 向量化 → 落库。
 
-- 按 file_hash 幂等：重复上传直接返回已有文档
-- 解析产物（页级中间表示）落盘缓存 data/parsed/{hash}.json，重跑不重复调 VLM
-- 进度与统计全程记录（成本基线）
+多租户模式：
+- kb_document 按 file_hash 内容去重（同文件共享底层存储）
+- kb_user_document 记录用户-文档映射（引用计数）
+- 删除时只删映射，引用归零才清理底层数据
 """
 import hashlib
 import json
@@ -68,30 +69,20 @@ def _parse_file(path: Path, file_hash: str) -> tuple[list[dict], dict]:
     return pages, stats
 
 
-def _retire_document(doc_id: int, reason: str = "replaced") -> None:
-    """下线文档：chunk 全部失活 + 文档置 3（retired）。不物理删除，保留溯源。"""
-    with pg_store.connect() as conn:
-        conn.execute("UPDATE kb_chunk SET status=0 WHERE document_id=%s AND status=1",
-                     (doc_id,))
-        conn.execute(
-            "UPDATE kb_document SET status=3, error=%s WHERE id=%s",
-            (f"retired:{reason}"[:2000], doc_id))
-    bm25_index.bump_version()
-    from retrieval import semantic_cache
-    semantic_cache.invalidate()
-    logger.info("document %s retired (%s)", doc_id, reason)
 
-
-def _after_kb_changed():
+def _after_kb_changed(user_id: int | None = None):
     """知识库内容变化后的统一收尾：BM25 重建标记 + 语义缓存失效。"""
     bm25_index.bump_version()
     from retrieval import semantic_cache
-    semantic_cache.invalidate()
+    semantic_cache.invalidate(user_id)
 
 
-def ingest_file(path: Path, user_title: str = "", replace: bool = False,
+def ingest_file(path: Path, user_id: int | None = None, user_title: str = "", replace: bool = False,
                 filename_override: str = "") -> dict:
-    """完整入库流程。返回统计信息。
+    """多租户入库流程。返回统计信息。
+
+    同文件共享：同一 file_hash 只存一份底层数据（chunk + 向量），
+    不同用户通过 kb_user_document 映射表关联。
 
     replace=True 时：同 filename 的已入库文档会被下线（chunk 失活、文档置 retired），
     本文件作为新文档入库（默认替换语义，与主流知识库产品一致）。
@@ -107,20 +98,39 @@ def ingest_file(path: Path, user_title: str = "", replace: bool = False,
     doc_type = DOC_TYPES.get(suffix, "image" if suffix in IMAGE_EXTS else "unknown")
     filename = filename_override or path.name
 
-    # 幂等检查
-    existing = pg_store.query_one("SELECT id, status FROM kb_document WHERE file_hash=%s",
-                                  (file_hash,))
-    if existing:
-        return {"document_id": existing["id"], "status": existing["status"],
-                "deduplicated": True}
+    # 内容级去重：查全局是否已有同 hash 文档
+    existing_doc = pg_store.query_one(
+        "SELECT id, status FROM kb_document WHERE file_hash=%s AND status=1",
+        (file_hash,))
 
-    # 替换语义：同文件名旧文档下线
+    if existing_doc:
+        doc_id = existing_doc["id"]
+        if user_id is not None:
+            # 检查当前用户是否已拥有该文档映射
+            existing_map = pg_store.query_one(
+                "SELECT id FROM kb_user_document WHERE user_id=%s AND document_id=%s",
+                (user_id, doc_id))
+            if existing_map:
+                return {"document_id": doc_id, "status": 1,
+                        "deduplicated": True, "shared": True}
+            # 创建映射（引用计数 +1），不重复解析/向量化
+            pg_store.execute(
+                "INSERT INTO kb_user_document (user_id, document_id) VALUES (%s,%s)",
+                (user_id, doc_id))
+        return {"document_id": doc_id, "status": 1,
+                "deduplicated": True, "shared": user_id is not None,
+                "note": "同文件已存在" if user_id is None else "同文件已存在，仅创建映射"}
+
+    # 替换语义：同文件名旧文档下线（仅影响当前用户的映射）
     retired: list[int] = []
-    if replace:
+    if replace and user_id is not None:
         olds = pg_store.query(
-            "SELECT id FROM kb_document WHERE filename=%s AND status=1", (filename,))
+            """SELECT d.id FROM kb_document d
+               JOIN kb_user_document ud ON ud.document_id=d.id
+               WHERE d.filename=%s AND d.status=1 AND ud.user_id=%s""",
+            (filename, user_id))
         for row in olds:
-            _retire_document(row["id"], "replaced")
+            _retire_document_for_user(row["id"], user_id, "replaced")
             retired.append(row["id"])
 
     doc_id = pg_store.query_one(
@@ -157,8 +167,14 @@ def ingest_file(path: Path, user_title: str = "", replace: bool = False,
                    WHERE id=%s""",
                 (stats.get("page_count", len(pages)), char_total, doc_id))
 
+        # 创建用户-文档映射（仅当指定了 user_id）
+        if user_id is not None:
+            pg_store.execute(
+                "INSERT INTO kb_user_document (user_id, document_id) VALUES (%s,%s)",
+                (user_id, doc_id))
+
         elapsed = time.perf_counter() - start
-        _after_kb_changed()
+        _after_kb_changed(user_id)
         result = {"document_id": doc_id, "status": 1, "deduplicated": False,
                   "chunks": len(chunks),
                   "chunk_types": {t: sum(1 for c in chunks if c.chunk_type == t)
@@ -176,33 +192,91 @@ def ingest_file(path: Path, user_title: str = "", replace: bool = False,
         raise
 
 
-def ingest_directory(dir_path: Path, replace: bool = False) -> list[dict]:
-    """批量入库目录下所有支持的文件（递归）。replace 透传给 ingest_file。"""
+def ingest_directory(dir_path: Path, user_id: int, replace: bool = False) -> list[dict]:
+    """批量入库目录下所有支持的文件（递归）。"""
     dir_path = Path(dir_path)
     results = []
     files = sorted(p for p in dir_path.rglob("*")
                    if p.suffix.lower() in set(DOC_TYPES) | IMAGE_EXTS)
     for f in files:
         try:
-            results.append({"file": str(f.name), **ingest_file(f, replace=replace)})
+            results.append({"file": str(f.name),
+                            **ingest_file(f, user_id=user_id, replace=replace)})
         except Exception as e:
             results.append({"file": str(f.name), "error": str(e)[:200]})
     return results
 
 
-def delete_document(doc_id: int) -> dict:
-    """删除文档（软删：chunk 下线 + 文档置 retired）。返回下线统计。"""
+def _retire_document(doc_id: int, reason: str = "replaced") -> None:
+    """admin 模式：直接软删文档（chunk 失活 + 文档置 3），清理所有用户映射。"""
+    with pg_store.connect() as conn:
+        conn.execute("UPDATE kb_chunk SET status=0 WHERE document_id=%s AND status=1",
+                     (doc_id,))
+        conn.execute(
+            "UPDATE kb_document SET status=3, error=%s WHERE id=%s",
+            (f"retired:{reason}"[:2000], doc_id))
+    pg_store.execute("DELETE FROM kb_user_document WHERE document_id=%s", (doc_id,))
+    _after_kb_changed()   # 全局缓存失效
+    logger.info("document %s retired (%s) [admin]", doc_id, reason)
+
+
+def _retire_document_for_user(doc_id: int, user_id: int, reason: str = "replaced") -> None:
+    """为用户下线文档：删除映射 + 引用计数检查。"""
+    # 删除该用户的映射
+    pg_store.execute(
+        "DELETE FROM kb_user_document WHERE user_id=%s AND document_id=%s",
+        (user_id, doc_id))
+    # 引用计数：检查是否还有其他用户映射
+    remaining = pg_store.query_one(
+        "SELECT count(*) AS n FROM kb_user_document WHERE document_id=%s", (doc_id,))
+    if remaining and remaining["n"] > 0:
+        # 其他用户还在用，不清理底层数据
+        _after_kb_changed(user_id)
+        logger.info("document %s unmapped for user %s (%s), %d refs remain",
+                    doc_id, user_id, reason, remaining["n"])
+        return
+    # 无引用，软删文档 + chunk 失活
+    with pg_store.connect() as conn:
+        conn.execute("UPDATE kb_chunk SET status=0 WHERE document_id=%s AND status=1",
+                     (doc_id,))
+        conn.execute(
+            "UPDATE kb_document SET status=3, error=%s WHERE id=%s",
+            (f"retired:{reason}"[:2000], doc_id))
+    _after_kb_changed(user_id)
+    logger.info("document %s retired (%s), no refs left", doc_id, reason)
+
+
+def delete_document(doc_id: int, user_id: int | None = None) -> dict:
+    """删除文档（多租户：只删映射，引用归零才清理底层数据）。
+    user_id=None 时 admin 模式：直接软删文档，清理所有映射。
+    """
     doc = pg_store.query_one("SELECT id, filename, status FROM kb_document WHERE id=%s",
                              (doc_id,))
     if not doc:
         raise ValueError(f"文档 {doc_id} 不存在")
+    if user_id is not None:
+        # 权限校验：用户必须拥有该文档映射
+        ownership = pg_store.query_one(
+            "SELECT id FROM kb_user_document WHERE user_id=%s AND document_id=%s",
+            (user_id, doc_id))
+        if not ownership:
+            raise ValueError(f"文档 {doc_id} 不属于当前用户")
     if doc["status"] == 3:
+        # 已下线的文档，清理残留映射
+        if user_id is not None:
+            pg_store.execute(
+                "DELETE FROM kb_user_document WHERE user_id=%s AND document_id=%s",
+                (user_id, doc_id))
+        else:
+            pg_store.execute(
+                "DELETE FROM kb_user_document WHERE document_id=%s", (doc_id,))
         return {"document_id": doc_id, "already_retired": True}
-    active = pg_store.query_one(
-        "SELECT count(*) AS n FROM kb_chunk WHERE document_id=%s AND status=1", (doc_id,))
-    _retire_document(doc_id, "deleted")
-    return {"document_id": doc_id, "filename": doc["filename"],
-            "chunks_offlined": active["n"] or 0}
+    if user_id is not None:
+        _retire_document_for_user(doc_id, user_id, "deleted")
+    else:
+        # admin 模式：直接软删
+        _retire_document(doc_id, "deleted")
+    return {"document_id": doc_id, "filename": doc["filename"], "deleted": True}
 
 
 def document_status(doc_id: int) -> dict | None:
@@ -213,9 +287,20 @@ def document_status(doc_id: int) -> dict | None:
            FROM kb_document d WHERE d.id=%s""", (doc_id,))
 
 
-def list_documents() -> list[dict]:
+def list_documents(user_id: int | None = None) -> list[dict]:
+    if user_id is None:
+        # 全局访问（admin）：列出全部文档
+        return pg_store.query(
+            """SELECT d.id, d.filename, d.doc_type, d.status, d.page_count, d.char_count,
+                      (SELECT count(*) FROM kb_chunk c WHERE c.document_id=d.id AND c.status=1) AS chunk_count,
+                      d.created_at
+               FROM kb_document d
+               ORDER BY d.id""")
     return pg_store.query(
         """SELECT d.id, d.filename, d.doc_type, d.status, d.page_count, d.char_count,
-                  (SELECT count(*) FROM kb_chunk c WHERE c.document_id=d.id) AS chunk_count,
+                  (SELECT count(*) FROM kb_chunk c WHERE c.document_id=d.id AND c.status=1) AS chunk_count,
                   d.created_at
-           FROM kb_document d ORDER BY d.id""")
+           FROM kb_document d
+           JOIN kb_user_document ud ON ud.document_id=d.id
+           WHERE ud.user_id=%s
+           ORDER BY d.id""", (user_id,))

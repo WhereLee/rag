@@ -1,8 +1,18 @@
-"""Agent API：LangGraph 主图执行入口（HITL resume 在 Phase 5 加入）。"""
-from fastapi import APIRouter, HTTPException
+"""Agent API：LangGraph 主图执行入口。多租户版本。"""
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(tags=["agent"])
+
+
+def _get_user_id(request: Request) -> int | None:
+    uid = request.headers.get("X-User-Id")
+    if uid is None:
+        return None
+    try:
+        return int(uid)
+    except ValueError:
+        raise HTTPException(400, "X-User-Id 必须是整数")
 
 
 class AgentRunRequest(BaseModel):
@@ -33,11 +43,12 @@ def set_experiment(req: ExperimentRequest):
 
 
 @router.post("/run")
-def run(req: AgentRunRequest):
+def run(req: AgentRunRequest, request: Request = None):
     if not req.query.strip():
         raise HTTPException(400, "query 不能为空")
+    user_id = _get_user_id(request) if request else None
     from agent.main_graph import run_agent
     try:
-        return run_agent(req.query, req.session_id, req.history)
+        return run_agent(req.query, req.session_id, req.history, user_id=user_id)
     except Exception as e:
         raise HTTPException(500, f"agent 执行失败: {e}")

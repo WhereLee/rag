@@ -77,6 +77,11 @@ class MiMoClient:
         payload = self._payload(messages, thinking, temperature, max_tokens, response_json, extra)
         last_err: Exception | None = None
         budget_cap = 8192   # 预算递增上限：reasoning 挤占正文时逐级加大
+        # 日志：记录 prompt 摘要（仅前 200 字符，避免泄露敏感内容）
+        prompt_summary = ""
+        if messages:
+            last_msg = messages[-1].get("content", "")
+            prompt_summary = last_msg[:200] + ("..." if len(last_msg) > 200 else "")
         for attempt in range(config.LLM_MAX_RETRIES + 1):
             start = time.perf_counter()
             try:
@@ -94,6 +99,7 @@ class MiMoClient:
                 msg = choice["message"]
                 usage = data.get("usage") or {}
                 content = msg.get("content") or ""
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
                 # 预算耗尽但正文为空 → reasoning 挤占，逐级加大预算重试（不计入失败重试次数）
                 if not content and choice.get("finish_reason") == "length":
                     nxt = min(payload["max_tokens"] * 2, budget_cap)
@@ -101,15 +107,25 @@ class MiMoClient:
                         payload["max_tokens"] = nxt
                         logger.warning("empty content with finish=length; retry with max_tokens=%d", nxt)
                         continue
-                return LLMResult(
+                result = LLMResult(
                     content=content,
                     reasoning=msg.get("reasoning_content") or "",
                     token_in=usage.get("prompt_tokens", 0),
                     token_out=usage.get("completion_tokens", 0),
                     model=data.get("model", self.model),
                     finish_reason=choice.get("finish_reason", ""),
-                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    elapsed_ms=elapsed_ms,
                 )
+                # 结构化日志：记录每次 LLM 调用
+                logger.info(
+                    "LLM call: model=%s thinking=%s tokens_in=%d tokens_out=%d "
+                    "elapsed=%dms finish=%s prompt_preview=%.200s",
+                    result.model, thinking, result.token_in, result.token_out,
+                    result.elapsed_ms, result.finish_reason, prompt_summary,
+                    extra={"ctx_model": result.model, "ctx_tokens_in": result.token_in,
+                           "ctx_tokens_out": result.token_out, "ctx_elapsed_ms": result.elapsed_ms,
+                           "ctx_finish": result.finish_reason, "ctx_thinking": thinking})
+                return result
             except (httpx.HTTPError, LLMError, KeyError, json.JSONDecodeError) as e:
                 last_err = e
                 if isinstance(e, LLMError) and "HTTP 4" in str(e):
@@ -119,6 +135,55 @@ class MiMoClient:
                                attempt + 1, config.LLM_MAX_RETRIES + 1, e, wait)
                 time.sleep(wait)
         raise LLMError(f"LLM 调用失败（已重试）: {last_err}")
+
+    def chat_with_tools(self, messages: list[dict], tools: list[dict] | None = None,
+                        thinking: bool = False, max_tokens: int = 4096) -> dict:
+        """Function Calling 调用：返回 {content, tool_calls, token_in, token_out, elapsed_ms}。
+
+        tool_calls 格式：[{"name": "...", "arguments": {...}, "id": "..."}]
+        如果没有 tool_calls，tool_calls 为空列表。
+        """
+        payload = self._payload(messages, thinking, None, max_tokens, False, {})
+        if tools:
+            payload["tools"] = tools
+        start = time.perf_counter()
+        with httpx.Client(timeout=config.LLM_TIMEOUT) as client:
+            resp = client.post(f"{self.base_url}/chat/completions",
+                               headers=self._headers(),
+                               content=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        if resp.status_code >= 400:
+            raise LLMError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        choice = data["choices"][0]
+        msg = choice["message"]
+        usage = data.get("usage") or {}
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        tool_calls = []
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except (json.JSONDecodeError, KeyError):
+                    args = {}
+                tool_calls.append({
+                    "name": tc["function"]["name"],
+                    "arguments": args,
+                    "id": tc.get("id", ""),
+                })
+
+        result = {
+            "content": (msg.get("content") or "").strip(),
+            "tool_calls": tool_calls,
+            "token_in": usage.get("prompt_tokens", 0),
+            "token_out": usage.get("completion_tokens", 0),
+            "elapsed_ms": elapsed_ms,
+            "finish_reason": choice.get("finish_reason", ""),
+        }
+        logger.info("LLM tools call: model=%s tool_calls=%d tokens_in=%d tokens_out=%d elapsed=%dms",
+                     data.get("model", self.model), len(tool_calls),
+                     result["token_in"], result["token_out"], elapsed_ms)
+        return result
 
     def chat_json(self, messages: list[dict], thinking: bool = False,
                   max_tokens: int = 2048, **extra) -> dict:

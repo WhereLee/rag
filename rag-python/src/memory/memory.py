@@ -1,10 +1,11 @@
 """
 记忆系统：会话记忆（qa_log 滑动窗口）+ 长期记忆（语义召回）。
 
+多租户：user_id 关联 kb_user.id，记忆按用户隔离。
 长期记忆提炼：每 5 轮由 LLM 从对话中抽取
 - focus：用户持续关注的文档/主题
 - open_question：尚未解决的疑问
-问答时按语义相似度召回 top3 注入提示词，实现"跨会话记得用户在探讨什么"。
+问答时按语义相似度召回 top3 注入提示词，实现“跨会话记得用户在探讨什么”。
 """
 import json
 import logging
@@ -42,7 +43,7 @@ def session_turn_count(session_id: str) -> int:
     return r["n"] if r else 0
 
 
-def extract_and_store(session_id: str, user_id: str = "default"):
+def extract_and_store(session_id: str, user_id: int):
     """从会话中提炼长期记忆并入库（幂等：同 session 每 EXTRACT_EVERY 轮一次）。"""
     history = get_history(session_id, limit=12)
     if len(history) < 4:
@@ -82,11 +83,11 @@ def extract_and_store(session_id: str, user_id: str = "default"):
                 """INSERT INTO memory_entry (user_id, mem_type, content, embedding)
                    VALUES (%s,%s,%s,%s)""",
                 (user_id, mem_type, content, v))
-    logger.info("memory stored: session=%s items=%d", session_id, len(items))
+    logger.info("memory stored: session=%s items=%d user=%d", session_id, len(items), user_id)
     return len(items)
 
 
-def recall(query: str, user_id: str = "default", top: int = RECALL_TOP) -> list[dict]:
+def recall(query: str, user_id: int, top: int = RECALL_TOP) -> list[dict]:
     """语义召回相关长期记忆（pgvector ANN 检索，替代全表拉取 + Python 余弦）。"""
     qvec = get_embedder().encode_query(query)
     from pgvector.psycopg import register_vector
@@ -104,8 +105,8 @@ def recall(query: str, user_id: str = "default", top: int = RECALL_TOP) -> list[
                  "sim": round(float(r["sim"]), 3)} for r in cur.fetchall()]
 
 
-def maybe_extract(session_id: str):
+def maybe_extract(session_id: str, user_id: int):
     """轮次触发器：每 EXTRACT_EVERY 轮提炼一次。"""
     n = session_turn_count(session_id)
     if n > 0 and n % EXTRACT_EVERY == 0:
-        extract_and_store(session_id)
+        extract_and_store(session_id, user_id=user_id)

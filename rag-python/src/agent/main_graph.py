@@ -13,6 +13,7 @@ LangGraph 主图：Agentic RAG 问答流程。
 - 子查询检索在 retrieve 节点内串行执行（v1 求确定性；LangGraph Send 并行留作优化项）
 - 每节点记录 stage 耗时与 token，落 qa_log.route 可观测实际走的档位
 """
+import json
 import logging
 import time
 import uuid
@@ -57,11 +58,11 @@ def _build_context(hits: list) -> str:
 
 # ---------------------------------------------------------------- 节点
 
-def _route_prior(query: str) -> str:
+def _route_prior(query: str, user_id: int | None = None) -> str:
     """轻量检索先验：top1 片段（不精排），供路由参考知识库内容。
     失败不阻塞（降级为空先验）。"""
     try:
-        r = hybrid_search(query, top_k=1, use_rerank=False)
+        r = hybrid_search(query, top_k=1, use_rerank=False, user_id=user_id)
         if r["hits"]:
             h = r["hits"][0]
             return f"({h['doc_name']} p.{h['page_no'] + 1}) {h['content'][:200]}"
@@ -73,15 +74,16 @@ def _route_prior(query: str) -> str:
 
 def route_node(state: AgentState) -> dict:
     t0 = time.perf_counter()
+    user_id = state.get("user_id")
     try:
         obj = get_client().chat_json(
             [{"role": "user", "content": fill(
-                "route", prior=_route_prior(state["query"]),
+                "route", prior=_route_prior(state["query"], user_id),
                 history=_fmt_history(state.get("history") or []),
                 question=state["query"])}],
             thinking=False, max_tokens=1024)
         route = obj.get("route", "standard")
-        if route not in ("simple", "standard", "complex", "out_of_scope"):
+        if route not in ("direct", "simple", "standard", "complex", "out_of_scope", "tool_use"):
             route = "standard"
     except LLMError as e:
         logger.warning("route failed -> standard: %s", e)
@@ -107,7 +109,8 @@ def decompose_node(state: AgentState) -> dict:
             "stages": _stage(state, "decompose", t0, n=len(subs))}
 
 
-def _retrieve_multi(original_query: str, sub_queries: list[str]) -> tuple[dict[int, dict], bool]:
+def _retrieve_multi(original_query: str, sub_queries: list[str],
+                    user_id: int | None = None) -> tuple[dict[int, dict], bool]:
     """多子查询检索：并行粗筛（无精排，避免 reranker 信号量排队雪崩）
     → 合并候选 → 以原问题单次精排。返回 (hits_by_id, low_conf)。
 
@@ -119,7 +122,7 @@ def _retrieve_multi(original_query: str, sub_queries: list[str]) -> tuple[dict[i
 
     all_hits: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=min(3, len(sub_queries))) as pool:
-        results = list(pool.map(lambda q: hybrid_search(q, use_rerank=False), sub_queries))
+        results = list(pool.map(lambda q: hybrid_search(q, use_rerank=False, user_id=user_id), sub_queries))
     for result in results:
         for h in result["hits"]:
             cid = h["chunk_id"]
@@ -157,13 +160,14 @@ def _retrieve_multi(original_query: str, sub_queries: list[str]) -> tuple[dict[i
 def retrieve_node(state: AgentState) -> dict:
     t0 = time.perf_counter()
     queries = state.get("search_queries") or [state["query"]]
+    user_id = state.get("user_id")
     all_hits: dict[int, dict] = {}
     low_conf = False
     if len(queries) > 1:
         # 多子查询：并行粗筛 + 单次精排（complex 档主路径）
-        all_hits, low_conf = _retrieve_multi(state["query"], queries)
+        all_hits, low_conf = _retrieve_multi(state["query"], queries, user_id)
     else:
-        result = hybrid_search(queries[0])
+        result = hybrid_search(queries[0], user_id=user_id)
         low_conf = result["low_confidence"]
         for h in result["hits"]:
             all_hits[h["chunk_id"]] = h
@@ -261,6 +265,136 @@ def guard_node(state: AgentState) -> dict:
     return {"answer": answer, "final_route": "guard"}
 
 
+# direct 档位系统提示词：告诉 LLM 它是文档问答助手，简要介绍能力
+DIRECT_SYSTEM_PROMPT = """你是一个智能文档问答助手。你的主要能力是：
+- 根据用户上传的文档（支持 PDF、Markdown、DOCX、图片）回答问题
+- 支持多轮对话，能记住对话上下文
+- 支持文档管理（上传、查看、删除）
+
+对于打招呼、闲聊、感谢等不涉及文档内容的问题，请简短友好地回应，并引导用户围绕文档提问。
+不要编造文档中没有的内容。"""
+
+
+def direct_generate_node(state: AgentState) -> dict:
+    """Adaptive RAG direct 档位：不检索，直接 LLM 生成。
+    用于打招呼、闲聊、系统能力询问等不需要检索的场景。"""
+    t0 = time.perf_counter()
+    query = state["query"]
+    history = state.get("history") or []
+    # 构建消息：system + 最近对话历史 + 当前问题
+    messages = [{"role": "system", "content": DIRECT_SYSTEM_PROMPT}]
+    for h in history[-4:]:
+        messages.append({"role": h.get("role", "user"), "content": h["content"]})
+    messages.append({"role": "user", "content": query})
+    try:
+        llm = get_client().chat(messages, thinking=False, max_tokens=512)
+        answer = llm.content.strip()
+        tokens = llm.token_in + llm.token_out
+    except LLMError as e:
+        logger.warning("direct_generate failed: %s", e)
+        answer = "你好！我是智能文档问答助手。你可以上传文档后向我提问，我会根据文档内容回答你的问题。"
+        tokens = 0
+    return {
+        "answer": answer,
+        "final_route": "direct",
+        "token_in": state.get("token_in", 0) + (tokens // 2 if tokens else 0),
+        "token_out": state.get("token_out", 0) + (tokens - tokens // 2 if tokens else 0),
+        "stages": _stage(state, "direct_generate", t0),
+    }
+
+
+TOOL_AGENT_SYSTEM_PROMPT = """你是一个智能文档管理助手。你可以通过工具帮助用户管理文档和查看系统信息。
+可用工具：
+- list_documents：列出用户的所有文档
+- delete_document：删除指定文档（需要文档 ID）
+- get_token_usage：查看今日 token 使用情况
+- get_document_chunks：预览文档的分块内容
+
+请先理解用户的需求，然后调用合适的工具。如果用户想删除文档，请先列出文档让用户确认。"""
+
+
+def tool_agent_node(state: AgentState) -> dict:
+    """Function Calling 工具 Agent：LLM 自主决定调用哪些工具，执行后生成回答。"""
+    t0 = time.perf_counter()
+    from agent.tools import TOOL_SCHEMAS, execute_tool
+
+    query = state["query"]
+    user_id = state.get("user_id")
+    history = state.get("history") or []
+
+    # 构建消息
+    messages = [{"role": "system", "content": TOOL_AGENT_SYSTEM_PROMPT}]
+    for h in history[-4:]:
+        messages.append({"role": h.get("role", "user"), "content": h["content"]})
+    messages.append({"role": "user", "content": query})
+
+    total_tokens_in = 0
+    total_tokens_out = 0
+    stages = list(state.get("stages") or [])
+    tool_round = 0
+    MAX_TOOL_ROUNDS = 3  # 最多 3 轮工具调用
+
+    while tool_round < MAX_TOOL_ROUNDS:
+        tool_round += 1
+        try:
+            result = get_client().chat_with_tools(
+                messages, tools=TOOL_SCHEMAS, thinking=False, max_tokens=2048)
+        except LLMError as e:
+            logger.warning("tool_agent LLM call failed: %s", e)
+            return {
+                "answer": "工具调用失败，请稍后重试。",
+                "final_route": "tool_use",
+                "stages": _stage(state, "tool_agent", t0, rounds=tool_round, error=str(e)),
+            }
+
+        total_tokens_in += result["token_in"]
+        total_tokens_out += result["token_out"]
+        stages.append({"stage": f"tool_llm_{tool_round}", "ms": result["elapsed_ms"],
+                       "tool_calls": len(result["tool_calls"])})
+
+        # 如果没有 tool_calls，LLM 给出了最终回答
+        if not result["tool_calls"]:
+            answer = result["content"] or "操作完成。"
+            return {
+                "answer": answer,
+                "final_route": "tool_use",
+                "token_in": state.get("token_in", 0) + total_tokens_in,
+                "token_out": state.get("token_out", 0) + total_tokens_out,
+                "stages": stages,
+            }
+
+        # 执行工具调用，结果回传 LLM
+        # 先添加 assistant 消息（包含 tool_calls）
+        tool_call_msgs = []
+        for tc in result["tool_calls"]:
+            tool_call_msgs.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": tc["id"], "type": "function",
+                                "function": {"name": tc["name"],
+                                             "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}}]
+            })
+            # 执行工具
+            tc_result = execute_tool(tc["name"], tc["arguments"], user_id=user_id)
+            logger.info("Tool call: %s(%s) -> %.200s", tc["name"], tc["arguments"], tc_result)
+            # 添加工具结果
+            tool_call_msgs.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": tc_result,
+            })
+        messages.extend(tool_call_msgs)
+
+    # 超过最大轮数
+    return {
+        "answer": "工具调用轮数超限，请简化问题重试。",
+        "final_route": "tool_use",
+        "token_in": state.get("token_in", 0) + total_tokens_in,
+        "token_out": state.get("token_out", 0) + total_tokens_out,
+        "stages": stages,
+    }
+
+
 def no_answer_node(state: AgentState) -> dict:
     answer = ("根据现有文档未找到相关信息，无法回答该问题。"
               + (f"（检索评估显示缺少：{(state.get('grade') or {}).get('missing', '')[:100]}）"
@@ -271,8 +405,9 @@ def no_answer_node(state: AgentState) -> dict:
 # ---------------------------------------------------------------- 路由函数
 
 def route_by_type(state: AgentState) -> str:
-    return {"out_of_scope": "guard", "simple": "retrieve",
-            "standard": "retrieve", "complex": "decompose"}[state["route"]]
+    return {"direct": "direct_generate", "out_of_scope": "guard", "simple": "retrieve",
+            "standard": "retrieve", "complex": "decompose",
+            "tool_use": "tool_agent"}[state["route"]]
 
 
 def after_grade(state: AgentState) -> str:
@@ -307,13 +442,16 @@ def _build_graph() -> StateGraph:
     g.add_node("rewrite", rewrite_node)
     g.add_node("generate", generate_node)
     g.add_node("reflect", reflect_node)
+    g.add_node("direct_generate", direct_generate_node)
+    g.add_node("tool_agent", tool_agent_node)
     g.add_node("guard", guard_node)
     g.add_node("no_answer", no_answer_node)
 
     g.add_edge(START, "route")
     g.add_conditional_edges("route", route_by_type,
-                            {"guard": "guard", "retrieve": "retrieve",
-                             "decompose": "decompose"})
+                            {"direct_generate": "direct_generate", "guard": "guard",
+                             "retrieve": "retrieve", "decompose": "decompose",
+                             "tool_agent": "tool_agent"})
     g.add_edge("decompose", "retrieve")
     g.add_edge("retrieve", "grade")
     g.add_conditional_edges("grade", after_grade,
@@ -327,6 +465,8 @@ def _build_graph() -> StateGraph:
                    and not experiment_flags["disable_reflect"] else END),
         {"reflect": "reflect", END: END})
     g.add_conditional_edges("reflect", after_reflect, {"generate": "generate", END: END})
+    g.add_edge("direct_generate", END)
+    g.add_edge("tool_agent", END)
     g.add_edge("guard", END)
     g.add_edge("no_answer", END)
     return g
@@ -361,18 +501,20 @@ def get_graph():
     return _graph
 
 
-def run_agent(query: str, session_id: str = "", history: list = None) -> dict:
+def run_agent(query: str, session_id: str = "", history: list = None,
+              user_id: int | None = None) -> dict:
     """执行主图，返回 {answer, citations, meta}。"""
     with span("rag.agent_run", query_len=len(query)):
-        return _run_agent_inner(query, session_id, history)
+        return _run_agent_inner(query, session_id, history, user_id)
 
 
 def run_agent_eval(query: str) -> dict:
-    """评估专用：无 checkpointer，线程安全，不写 qa_log。"""
+    """评估专用：无 checkpointer，线程安全，不写 qa_log。使用 admin user_id（全量访问）。"""
     graph = get_eval_graph()
     trace_id = uuid.uuid4().hex[:16]
     t0 = time.perf_counter()
     init = {"messages": [], "query": query, "session_id": f"eval-{trace_id}",
+            "user_id": None,   # 评估场景全量访问
             "history": [], "route": "", "search_queries": [],
             "retrieval_round": 0, "hits": [], "low_confidence": False,
             "grade": {}, "answer": "", "reflection": {}, "reflect_retry": 0,
@@ -398,12 +540,14 @@ def run_agent_eval(query: str) -> dict:
             "refused": final_route in ("guard", "no_answer")}
 
 
-def _run_agent_inner(query: str, session_id: str, history: list) -> dict:
+def _run_agent_inner(query: str, session_id: str, history: list,
+                     user_id: int | None = None) -> dict:
     graph = get_graph()
     session_id = session_id or f"s-{uuid.uuid4().hex[:8]}"
     trace_id = uuid.uuid4().hex[:16]
     t0 = time.perf_counter()
     init = {"messages": [], "query": query, "session_id": session_id,
+            "user_id": user_id,
             "history": history or [], "route": "", "search_queries": [],
             "retrieval_round": 0, "hits": [], "low_confidence": False,
             "grade": {}, "answer": "", "reflection": {}, "reflect_retry": 0,
@@ -424,19 +568,19 @@ def _run_agent_inner(query: str, session_id: str, history: list) -> dict:
     try:
         from db import pg_store
         pg_store.execute(
-            """INSERT INTO qa_log (session_id, trace_id, query, answer, route, chunk_ids,
-                                   total_ms, token_in, token_out, thinking, cache_hit)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE)""",
-            (session_id, trace_id, query, final.get("answer", ""),
+            """INSERT INTO qa_log (session_id, user_id, trace_id, query, answer, route,
+                                   chunk_ids, total_ms, token_in, token_out, thinking, cache_hit)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE)""",
+            (session_id, user_id, trace_id, query, final.get("answer", ""),
              final_route, [h["chunk_id"] for h in hits], total_ms,
              final.get("token_in", 0), final.get("token_out", 0),
              route != "simple"))
         import json as _json
         pg_store.execute(
-            """INSERT INTO retrieval_log (trace_id, query, hit_count, top_score,
+            """INSERT INTO retrieval_log (user_id, trace_id, query, hit_count, top_score,
                                           low_confidence, stage_ms)
-               VALUES (%s,%s,%s,%s,%s,%s)""",
-            (trace_id, query, len(hits),
+               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (user_id, trace_id, query, len(hits),
              hits[0]["score"] if hits else None, final.get("low_confidence", False),
              _json.dumps({s["stage"]: s["ms"] for s in final.get("stages") or []})))
     except Exception as e:

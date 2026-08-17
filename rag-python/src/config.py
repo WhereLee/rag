@@ -63,9 +63,43 @@ RERANK_LOW = float(os.getenv("RERANK_LOW", "0.0"))          # 低于此分 → �
 API_PORT = _int("API_PORT", 8090)
 SERVICE_NAME = "rag-doc-qa"
 
+# --- 安全 ---
+# 内部 API Key：Python 服务与 Java 网关之间的鉴权密钥
+# 生产环境必须设置，未设置时仅允许 localhost 访问
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
 # 实验模式：EXPERIMENT_MODE=1 才允许通过 HTTP 修改实验开关（E3/E4）。
 # 实验脚本（run_experiments.py）进程内直调不受此限制。
 EXPERIMENT_MODE = os.getenv("EXPERIMENT_MODE", "") == "1"
 
 for _d in (CORPUS_DIR, PARSED_DIR, MODELS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+
+
+# ===== 启动安全校验 =====
+import logging as _logging
+_logger = _logging.getLogger("rag.security")
+
+def _check_security_config():
+    """检测敏感配置是否使用默认值，生产环境拒绝启动。"""
+    warnings = []
+    if not INTERNAL_API_KEY:
+        warnings.append("INTERNAL_API_KEY 未设置，仅允许 localhost 访问")
+    if "root" in PG_DSN and "localhost" in PG_DSN:
+        warnings.append("PG_DSN 使用默认密码 'root'")
+    if not MIMO_API_KEY:
+        warnings.append("MIMO_API_KEY 未设置，LLM 功能不可用")
+
+    is_prod = os.getenv("SPRING_PROFILES_ACTIVE", "") == "prod"
+    if warnings:
+        msg = "\n========== 安全配置警告 ==========\n" + \
+              "\n".join(f"  [!] {w}" for w in warnings) + \
+              "\n  生产部署前请设置对应环境变量！" + \
+              "\n=================================="
+        if is_prod:
+            raise RuntimeError(f"生产环境检测到不安全配置: {warnings}")
+        _logger.warning(msg)
+    else:
+        _logger.info("安全配置检查通过")
+
+_check_security_config()

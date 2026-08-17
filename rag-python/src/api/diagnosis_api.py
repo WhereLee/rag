@@ -1,9 +1,19 @@
-"""诊断 API。"""
-from fastapi import APIRouter
+"""诊断 API。多租户版本：admin 全局，普通用户仅看自己数据。"""
+from fastapi import APIRouter, HTTPException, Request
 
 from agent import diagnosis
 
 router = APIRouter(tags=["diagnosis"])
+
+
+def _get_user_id(request: Request) -> int | None:
+    uid = request.headers.get("X-User-Id")
+    if uid is None:
+        return None
+    try:
+        return int(uid)
+    except ValueError:
+        raise HTTPException(400, "X-User-Id 必须是整数")
 
 
 @router.get("/latest")
@@ -12,9 +22,10 @@ def latest():
 
 
 @router.get("/metrics")
-def metrics():
-    """采集指标的只读快照（供外部监控/Grafana 接入，不落库不调 LLM）。"""
-    return diagnosis.collect_metrics()
+def metrics(request: Request = None):
+    """采集指标的只读快照。user_id=None 时全局聚合（admin）。"""
+    user_id = _get_user_id(request) if request else None
+    return diagnosis.collect_metrics(user_id=user_id)
 
 
 @router.get("/history")

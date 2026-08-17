@@ -21,7 +21,7 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
-        # 允许通过 extra 携带结构化字段
+        # 允许通过 extra 携带结构化字段（ctx_ 前缀）
         for k, v in record.__dict__.items():
             if k.startswith("ctx_"):
                 payload[k[4:]] = v

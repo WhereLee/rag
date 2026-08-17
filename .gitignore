@@ -29,3 +29,7 @@ rag-java/target/
 
 # Redis dump
 dump.rdb
+
+# Frontend
+rag-frontend/node_modules/
+rag-frontend/dist/

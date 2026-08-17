@@ -1,5 +1,6 @@
 package com.rag.gateway.config;
 
+import com.rag.gateway.security.AuthRateLimiter;
 import com.rag.gateway.security.InMemoryRateLimiter;
 import com.rag.gateway.security.JwtUtil;
 import com.rag.gateway.security.RateLimiter;
@@ -23,10 +24,20 @@ public class GatewayConfig {
     }
 
     @Bean
-    public WebClient pythonWebClient(@Value("${gateway.python.base-url}") String baseUrl) {
-        return WebClient.builder()
+    public AuthRateLimiter authRateLimiter() {
+        return new AuthRateLimiter();
+    }
+
+    @Bean
+    public WebClient pythonWebClient(@Value("${gateway.python.base-url}") String baseUrl,
+                                     @Value("${gateway.internal-api-key:}") String internalKey) {
+        WebClient.Builder builder = WebClient.builder()
                 .baseUrl(baseUrl)
-                .codecs(c -> c.defaultCodecs().maxInMemorySize(8 * 1024 * 1024))
-                .build();
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(8 * 1024 * 1024));
+        // 安全加固：注入 X-Internal-Key，与 Python 服务 InternalAuthMiddleware 配合
+        if (internalKey != null && !internalKey.isEmpty()) {
+            builder.defaultHeader("X-Internal-Key", internalKey);
+        }
+        return builder.build();
     }
 }

@@ -10,6 +10,7 @@ class AgentState(TypedDict):
     # 输入
     query: str
     session_id: str
+    user_id: int           # 多租户：当前用户 ID
     history: list          # [{role, content}] 最近轮次
     # 路由与检索
     route: str             # simple/standard/complex/out_of_scope

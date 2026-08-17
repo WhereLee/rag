@@ -6,8 +6,8 @@ spring:
     name: rag-gateway
   datasource:
     url: jdbc:postgresql://localhost:5432/rag_kb
-    username: postgres
-    password: root
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:root}
     hikari:
       maximum-pool-size: 10
 
@@ -19,6 +19,9 @@ gateway:
     ttl-hours: 8
   rate-limit:
     per-minute: 20
+  internal-api-key: ${GATEWAY_INTERNAL_API_KEY:rag-internal-dev-key-2026}
+  cors:
+    allowed-origins: ${GATEWAY_CORS_ORIGINS:http://localhost:3000}
 
 logging:
   level:

@@ -26,21 +26,22 @@ ATTR_PROMPT = """用户对问答系统的回答不满意。请判断问题出在
 【当时的检索资料】{context}"""
 
 
-def submit_feedback(qa_log_id: int, rating: int, correction: str = "") -> dict:
+def submit_feedback(qa_log_id: int, rating: int, correction: str = "",
+                    user_id: int | None = None) -> dict:
     qa = pg_store.query_one(
         "SELECT * FROM qa_log WHERE id=%s", (qa_log_id,))
     if not qa:
         raise ValueError(f"qa_log {qa_log_id} 不存在")
     fb_id = pg_store.query_one(
-        "INSERT INTO feedback (qa_log_id, rating, correction) VALUES (%s,%s,%s) RETURNING id",
-        (qa_log_id, rating, correction))["id"]
+        "INSERT INTO feedback (qa_log_id, user_id, rating, correction) VALUES (%s,%s,%s,%s) RETURNING id",
+        (qa_log_id, user_id, rating, correction))["id"]
     result = {"feedback_id": fb_id}
     if rating < 0:
         snapshot = _build_snapshot(qa)
         bc_id = pg_store.query_one(
-            """INSERT INTO bad_case (qa_log_id, query, snapshot, attribution, status)
-               VALUES (%s,%s,%s,'pending','open') RETURNING id""",
-            (qa_log_id, qa["query"], json.dumps(snapshot, ensure_ascii=False)))["id"]
+            """INSERT INTO bad_case (qa_log_id, user_id, query, snapshot, attribution, status)
+               VALUES (%s,%s,%s,%s,'pending','open') RETURNING id""",
+            (qa_log_id, user_id, qa["query"], json.dumps(snapshot, ensure_ascii=False)))["id"]
         result["bad_case_id"] = bc_id
         # 立即尝试自动归因（失败不阻塞，保留 pending）
         try:
@@ -130,10 +131,17 @@ def confirm_bad_case(bad_case_id: int) -> dict:
                 "SELECT count(*) AS n FROM eval_question WHERE in_regression")["n"]}
 
 
-def list_bad_cases(status: str = "") -> list[dict]:
+def list_bad_cases(status: str = "", user_id: int | None = None) -> list[dict]:
     sql = "SELECT * FROM bad_case"
-    params = None
+    params = []
+    conditions = []
     if status:
-        sql += " WHERE status=%s"
-        params = (status,)
-    return pg_store.query(sql + " ORDER BY id DESC LIMIT 100", params)
+        conditions.append("status=%s")
+        params.append(status)
+    if user_id is not None:
+        conditions.append("user_id=%s")
+        params.append(user_id)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY id DESC LIMIT 100"
+    return pg_store.query(sql, params or None)
