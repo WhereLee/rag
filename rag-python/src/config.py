@@ -32,15 +32,17 @@ LLM_MAX_RETRIES = _int("LLM_MAX_RETRIES", 2)    # 失败重试次数
 # --- 数据层 ---
 PG_DSN = os.getenv("PG_DSN", "postgresql://postgres:root@localhost:5432/rag_kb")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-PG_POOL_MIN = _int("PG_POOL_MIN", 5)
-PG_POOL_MAX = _int("PG_POOL_MAX", 20)
+PG_POOL_MIN = _int("PG_POOL_MIN", 2)                 # cloud 缩减（master=5）
+PG_POOL_MAX = _int("PG_POOL_MAX", 10)                # cloud 缩减（master=20）
 
 # --- 本地推理 ---
 EMBED_DIM = _int("EMBED_DIM", 768)
 EMBED_MODEL_DIR = os.getenv("EMBED_MODEL_DIR", "bge-base-zh-v1.5-onnx-int8")
-RERANK_MODEL_DIR = os.getenv("RERANK_MODEL_DIR", "bge-reranker-v2-m3-onnx-int8")
-EMBED_BATCH_SIZE = _int("EMBED_BATCH_SIZE", 32)
-ONNX_THREADS = _int("ONNX_THREADS", 8)          # P 核绑定（i5-12500H）
+# cloud-deploy: 使用 bge-reranker-base（~100MB，纯中文场景够用）
+# master 分支使用 bge-reranker-v2-m3（543MB，多语言最强）
+RERANK_MODEL_DIR = os.getenv("RERANK_MODEL_DIR", "bge-reranker-base-onnx-int8")
+EMBED_BATCH_SIZE = _int("EMBED_BATCH_SIZE", 16)       # cloud 4G 内存缩减（master=32）
+ONNX_THREADS = _int("ONNX_THREADS", 2)               # cloud 4核（master=8 for i5-12500H P-cores）
 
 # 推理前绑定线程数（必须在 import onnxruntime 前生效）
 os.environ.setdefault("OMP_NUM_THREADS", str(ONNX_THREADS))

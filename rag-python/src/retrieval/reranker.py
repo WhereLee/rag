@@ -1,7 +1,9 @@
 """
-Reranker（CrossEncoder，ONNX INT8，bge-reranker-v2-m3）。
+Reranker（CrossEncoder，ONNX INT8）。
 
-- 全局单例（569MB 权重全进程只加载一份）
+- cloud-deploy 分支：bge-reranker-base（~100MB，纯中文场景够用，4G 服务器友好）
+- master 分支：bge-reranker-v2-m3（543MB，多语言最强，本地 16GB 开发机）
+- 全局单例（权重全进程只加载一份）
 - 信号量限流：最多 1 并发（CPU 推理饱和单核以上收益递减，防排队雪崩）
 - 排队超时 → RerankBusyError（上层降级 RRF 排序，与 pytxt 生产策略一致）
 """

@@ -9,7 +9,8 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
     password: ${SPRING_DATASOURCE_PASSWORD:root}
     hikari:
-      maximum-pool-size: 10
+      maximum-pool-size: 5       # cloud 4C4G 缩减（master=10）
+      minimum-idle: 2
 
 gateway:
   python:
