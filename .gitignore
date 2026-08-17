@@ -1,0 +1,31 @@
+# 密钥与本地配置
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 模型文件（体积大，单独管理）
+models/
+
+# 日志与临时文件
+logs/
+*.log
+_*.txt
+_*.json
+_*.py
+
+# IDE / Agent 临时文件
+.reasonix/
+
+# VLM 解析缓存（按图片 hash 落盘，不入库）
+data/parsed/
+
+# Java 构建产物
+rag-java/target/
+
+# Redis dump
+dump.rdb

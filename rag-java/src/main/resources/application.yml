@@ -1,0 +1,25 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: rag-gateway
+  datasource:
+    url: jdbc:postgresql://localhost:5432/rag_kb
+    username: postgres
+    password: root
+    hikari:
+      maximum-pool-size: 10
+
+gateway:
+  python:
+    base-url: http://127.0.0.1:8090
+  jwt:
+    secret: ${GATEWAY_JWT_SECRET:rag-gateway-local-dev-secret-change-me}
+    ttl-hours: 8
+  rate-limit:
+    per-minute: 20
+
+logging:
+  level:
+    com.rag: INFO

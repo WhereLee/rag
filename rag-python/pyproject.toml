@@ -1,0 +1,41 @@
+[project]
+name = "rag-doc-qa"
+version = "0.1.0"
+description = "智能文档问答系统（企业级工程深度）"
+requires-python = ">=3.12"
+dependencies = [
+    # 服务框架
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "python-dotenv",
+    # 数据层
+    "psycopg[binary,pool]",
+    "pgvector",
+    "redis",
+    # LangGraph Agent
+    "langgraph",
+    "langgraph-checkpoint-postgres",
+    "langchain-core",
+    # 文档解析
+    "pymupdf",
+    "python-docx",
+    # 本地推理
+    "onnxruntime",
+    "optimum",
+    "transformers",
+    "tokenizers",
+    "sentencepiece",
+    "numpy",
+    # 检索
+    "jieba",
+    "rank-bm25",
+    # 协议与观测
+    "mcp",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-zipkin-json",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

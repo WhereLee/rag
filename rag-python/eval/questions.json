@@ -1,0 +1,371 @@
+[
+ {
+  "question": "《企业智能文档管理白皮书（2026年）》由哪个机构发布？发布日期和编号是什么？",
+  "reference_answer": "蓝图数字研究院发布，2026年3月18日，编号 LT-2026-017",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "蓝图数字研究院",
+   "2026年3月18日",
+   "LT-2026-017"
+  ],
+  "regression": true
+ },
+ {
+  "question": "白皮书的调研覆盖了多少家企业？涉及哪些行业？",
+  "reference_answer": "1283 家企业，覆盖制造、金融、政务、教育、医疗五大行业",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "1283"
+  ],
+  "regression": false
+ },
+ {
+  "question": "受访企业中智能文档问答系统的整体部署率是多少？",
+  "reference_answer": "67%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "67%"
+  ],
+  "regression": true
+ },
+ {
+  "question": "哪个行业的智能文档管理系统部署率最高？具体数值是多少？",
+  "reference_answer": "制造业，72.4%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "制造业",
+   "72.4%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "白皮书中文档解析平均准确率是多少？",
+  "reference_answer": "98.5%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "98.5%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "端到端问答平均时延是多少？幻觉率降到了多少？",
+  "reference_answer": "2.3 秒；幻觉率降至 3.1%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "2.3 秒",
+   "3.1%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "研究院在哪三座城市设立了应用试点？项目负责人是谁？",
+  "reference_answer": "苏州、佛山、东莞；项目负责人为陈静博士",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "苏州",
+   "佛山",
+   "东莞",
+   "陈静"
+  ],
+  "regression": false
+ },
+ {
+  "question": "试点运行一年后三座城市合计节省了多少文档处理人力成本？",
+  "reference_answer": "约 4.2 亿元",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "4.2 亿元"
+  ],
+  "regression": false
+ },
+ {
+  "question": "苏州案例企业的文档总量和建库周期分别是多少？",
+  "reference_answer": "约 42 万卷；建库周期 11 天",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "42 万卷",
+   "11 天"
+  ],
+  "regression": false
+ },
+ {
+  "question": "佛山案例中归档差错率从多少降到了多少？",
+  "reference_answer": "从 2.7% 降至 0.4%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "2.7%",
+   "0.4%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "东莞医疗器械企业案例中合规问答幻觉率控制在多少？",
+  "reference_answer": "1.2%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "1.2%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "白皮书揭示的调研问卷回收有效率是多少？",
+  "reference_answer": "91.2%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "91.2%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "部署率为 61.2% 的是哪个行业？其主要驱动因素是什么？",
+  "reference_answer": "政务行业，主要驱动因素是公文流转与归档",
+  "dimension": "table",
+  "evidence_keywords": [
+   "61.2%",
+   "公文流转"
+  ],
+  "regression": false
+ },
+ {
+  "question": "金融行业的部署率是多少？主要驱动因素是什么？",
+  "reference_answer": "68.9%，合规审计自动化",
+  "dimension": "table",
+  "evidence_keywords": [
+   "68.9%",
+   "合规审计"
+  ],
+  "regression": true
+ },
+ {
+  "question": "哪种技术方案的平均召回率为 86.2%？其单次成本指数是多少？",
+  "reference_answer": "混合检索+精排，单次成本指数 2.4",
+  "dimension": "table",
+  "evidence_keywords": [
+   "86.2%",
+   "2.4"
+  ],
+  "regression": false
+ },
+ {
+  "question": "Agentic RAG 方案的平均时延和单次成本指数分别是多少？",
+  "reference_answer": "平均时延 4.2 秒，单次成本指数 5.8",
+  "dimension": "table",
+  "evidence_keywords": [
+   "4.2 秒",
+   "5.8"
+  ],
+  "regression": false
+ },
+ {
+  "question": "传统关键词检索的平均召回率是多少？",
+  "reference_answer": "61.3%",
+  "dimension": "table",
+  "evidence_keywords": [
+   "61.3%"
+  ],
+  "regression": true
+ },
+ {
+  "question": "技术规范中一级系统的系统可用率和问答端到端时延 P95 要求分别是什么？",
+  "reference_answer": "可用率 99.9%，P95 时延 ≤ 3 秒",
+  "dimension": "table",
+  "evidence_keywords": [
+   "99.9%",
+   "3 秒"
+  ],
+  "regression": false
+ },
+ {
+  "question": "技术规范中二级系统的幻觉率和拒答准确率要求是什么？",
+  "reference_answer": "幻觉率 ≤ 5%，拒答准确率 ≥ 85%",
+  "dimension": "table",
+  "evidence_keywords": [
+   "99.5%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "2026 年智能文档系统部署率预测值是多少？2023 年是多少？",
+  "reference_answer": "2026 年预测 78%，2023 年 42%",
+  "dimension": "table",
+  "evidence_keywords": [
+   "78%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "技术规范和白皮书分别对检索块长度与重叠长度提出了什么要求？",
+  "reference_answer": "检索块长度上限 500 字，相邻块重叠 60 字（规范 LT/S 001-2026 第 3 章）",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "500 字",
+   "60 字"
+  ],
+  "regression": true
+ },
+ {
+  "question": "白皮书描述的技术路线在 2024 到 2026 年经历了怎样的三阶段演进？",
+  "reference_answer": "2024 年以向量检索为主，2025 年混合检索与精排成为主流，2026 年 Agentic RAG 开始规模化落地",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "2024",
+   "2025",
+   "Agentic RAG"
+  ],
+  "regression": false
+ },
+ {
+  "question": "技术规范对知识库中不存在答案的问题有什么要求？白皮书哪个案例验证了这一机制的价值？",
+  "reference_answer": "应明确拒答禁止编造（规范 4.3 条）；佛山政务服务中心案例肯定了拒答机制的价值",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "拒答",
+   "佛山"
+  ],
+  "regression": false
+ },
+ {
+  "question": "白皮书建议企业选型时重点关注的四项能力是什么？",
+  "reference_answer": "多格式解析能力、评估体系建设、反馈闭环机制、人机边界设计",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "多格式解析",
+   "评估体系",
+   "反馈闭环",
+   "人机边界"
+  ],
+  "regression": false
+ },
+ {
+  "question": "调研揭示的三项主要风险是什么？各自的比例或程度如何？",
+  "reference_answer": "解析质量参差（约 23% 企业反馈不达预期）、评估缺失（超过半数企业无量化评估）、权限与审计不完善",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "23%",
+   "超过半数"
+  ],
+  "regression": false
+ },
+ {
+  "question": "技术规范中检索块、混合检索、精排三个术语的定义分别是什么？",
+  "reference_answer": "检索块是切分后用于向量化与检索的最小文本单元；混合检索是向量与关键词检索并行融合；精排是用交叉编码器对初筛结果重新打分",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "最小文本单元",
+   "交叉编码器"
+  ],
+  "regression": false
+ },
+ {
+  "question": "技术规范对提示词变更和负反馈处理分别有什么时限要求？",
+  "reference_answer": "审批响应时限不超过 48 小时；负反馈应在 7 日内完成归因分析",
+  "dimension": "cross_page",
+  "evidence_keywords": [
+   "48 小时",
+   "7 日"
+  ],
+  "regression": true
+ },
+ {
+  "question": "MinerU 支持将哪些格式的文档转换为 Markdown 或 JSON？",
+  "reference_answer": "PDF、图片、Office 文档（Word/PPT/Excel）、EPUB 等，支持公式、表格、图表等元素识别",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "MinerU"
+  ],
+  "regression": false
+ },
+ {
+  "question": "FastAPI 是什么？它的主要特点有哪些？",
+  "reference_answer": "FastAPI 是现代高性能的 Python Web 框架，用于构建 API，支持类型提示、自动文档、异步",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "FastAPI"
+  ],
+  "regression": true
+ },
+ {
+  "question": "文档智能解析技术规范的实施日期是哪一天？",
+  "reference_answer": "2026年7月1日",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "2026年7月1日"
+  ],
+  "regression": false
+ },
+ {
+  "question": "历史档案数字化试点的完成时限和总预算分别是什么？",
+  "reference_answer": "2026年12月31日前完成；总预算 180 万元",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "180 万元"
+  ],
+  "regression": true
+ },
+ {
+  "question": "档案数字化试点的扫描分辨率和抽检合格率要求是多少？",
+  "reference_answer": "不低于 300 DPI；抽检合格率不低于 99%",
+  "dimension": "factual",
+  "evidence_keywords": [
+   "300 DPI",
+   "99%"
+  ],
+  "regression": false
+ },
+ {
+  "question": "今天北京的天气怎么样？",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": false
+ },
+ {
+  "question": "请告诉我红烧肉的做法。",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": true
+ },
+ {
+  "question": "比特币现在的价格是多少？",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": false
+ },
+ {
+  "question": "法国的首都是哪里？",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": false
+ },
+ {
+  "question": "蓝图数字研究院的现任院长是谁？",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": true
+ },
+ {
+  "question": "2027 年智能文档系统市场份额预测是多少？",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": false
+ },
+ {
+  "question": "苏州试点项目的员工绩效考核细则是什么？",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": false
+ },
+ {
+  "question": "帮我写一首关于秋天的诗。",
+  "reference_answer": "",
+  "dimension": "refuse",
+  "evidence_keywords": [],
+  "regression": false
+ }
+]
