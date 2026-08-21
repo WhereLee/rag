@@ -43,6 +43,19 @@ SYSTEM_PROMPT = (
     "回答使用中文，简洁准确。"
 )
 
+# Agent 分级路由：轻量规则预筛（零 LLM 成本）。命中 → Agent 图（多轮检索+评估+反思），
+# 未命中 → 直筒 RAG。依据：P0 成本实测（simple 44s / complex 213s，大头是 LLM 多轮调用），
+# 分级 = 把 Agent 代价花在真正复杂的问题上。
+AGENT_KEYWORDS = ("对比", "差异", "区别", "比较", "总结", "分析", "分别", "哪些文档", "关系", "影响")
+AGENT_LEN_THRESHOLD = 40
+
+
+def _agent_route(query: str) -> bool:
+    """Agent 路由判定：关键词命中或超长问题 → 走 Agent 图。"""
+    if len(query) >= AGENT_LEN_THRESHOLD:
+        return True
+    return any(k in query for k in AGENT_KEYWORDS)
+
 
 class AskRequest(BaseModel):
     query: str
@@ -200,6 +213,24 @@ def _prepare_ask(req: AskRequest, user_id: int) -> dict:
                 "chunks": [], "rejected": False, "reject_reason": "",
                 "cache_ref": None, "qvec": None,
                 "memories": [], "history": [], "hist_text": "", "hist_tokens": 0}
+
+    # Agent 分级：规则预筛命中 → Agent 图（多轮检索/评估/反思，run_agent 内部落 qa_log）。
+    # 异常降级直筒（Agent 失败不阻塞问答）。
+    if _agent_route(query):
+        try:
+            from agent.main_graph import run_agent
+            ar = run_agent(query, session_id=req.session_id or "", user_id=user_id)
+            return {"cached": False, "agent_mode": True,
+                    "answer": ar.get("answer", ""),
+                    "citations": ar.get("citations") or [],
+                    "rejected": bool(ar.get("refused")),
+                    "reject_reason": f"agent:{ar.get('final_route') or ar.get('route', '')}",
+                    "agent_route": ar.get("final_route") or ar.get("route", ""),
+                    "chunks": [], "cache_ref": None, "qvec": None,
+                    "memories": [], "history": [], "hist_text": "", "hist_tokens": 0,
+                    "q_hash": q_hash}
+        except Exception as e:
+            print(f"[agent] run failed, fallback to direct: {e}", file=sys.stderr)
 
     chunks = retrieve(user_id, query, top_k=5, dir_id=dir_id)
 
@@ -405,6 +436,8 @@ async def ask(req: AskRequest, x_user_id: str = Header(default="")):
     hist_text = prep["hist_text"]
     hist_tokens = prep["hist_tokens"]
     history = prep["history"]
+    agent_mode = prep.get("agent_mode", False)
+    agent_route = prep.get("agent_route", "")
 
     t0 = time.time()
 
@@ -420,24 +453,26 @@ async def ask(req: AskRequest, x_user_id: str = Header(default="")):
 
         def persist(interrupted: bool = False):
             """落 qa_log（正常/客户端中断都落，审计与反馈可用）；qa_cache 仅正常完成且非拒答时写。
+            Agent 档由 run_agent 内部落 qa_log（route 记录实际档位），此处仅写缓存。
             返回 qa_log_id（失败返回 None，不阻塞流式）。"""
             answer = "".join(answer_buf)
             total_ms = int((time.time() - t0) * 1000)
             log_id = None
-            try:
-                log_id = pg_store.query_one(
-                    """INSERT INTO qa_log (session_id, user_id, query, answer, route,
-                                           chunk_ids, total_ms, token_in, token_out, thinking, cache_hit)
-                       VALUES (%s,%s,%s,%s,'qa',%s,%s,%s,%s,FALSE,FALSE) RETURNING id""",
-                    (req.session_id or None, user_id, query, answer,
-                     [c.chunk_id for c in chunks], total_ms,
-                     _estimate_tokens(query) + (hist_tokens if history else 0),
-                     _estimate_tokens(answer)))["id"]
-                if req.session_id and not interrupted:
-                    from memory import memory as mem
-                    mem.maybe_extract(req.session_id, user_id)
-            except Exception as e:
-                print(f"[qa_log] write failed: {e}", file=sys.stderr)
+            if not agent_mode:
+                try:
+                    log_id = pg_store.query_one(
+                        """INSERT INTO qa_log (session_id, user_id, query, answer, route,
+                                               chunk_ids, total_ms, token_in, token_out, thinking, cache_hit)
+                           VALUES (%s,%s,%s,%s,'qa',%s,%s,%s,%s,FALSE,FALSE) RETURNING id""",
+                        (req.session_id or None, user_id, query, answer,
+                         [c.chunk_id for c in chunks], total_ms,
+                         _estimate_tokens(query) + (hist_tokens if history else 0),
+                         _estimate_tokens(answer)))["id"]
+                    if req.session_id and not interrupted:
+                        from memory import memory as mem
+                        mem.maybe_extract(req.session_id, user_id)
+                except Exception as e:
+                    print(f"[qa_log] write failed: {e}", file=sys.stderr)
             # 问答存档写入：非拒答才存（存坏答案会污染后续命中）；文件变更时由 ingest 失效。
             # 注意：BM25 强命中保护降级路径（reranked=False）rejected=False 但 LLM 可能仍判无相关内容
             # （输出"资料中未找到..."），这类拒答文案同样不得存档，否则 L1 直接命中坏答案；
@@ -467,7 +502,16 @@ async def ask(req: AskRequest, x_user_id: str = Header(default="")):
 
         done_sent = False
         try:
-            if rejected:
+            if agent_mode:
+                # Agent 档：run_agent 已完整生成（多轮检索+评估+反思），非流式一次性输出
+                agent_answer = prep.get("answer", "")
+                answer_buf.append(agent_answer)
+                yield event("meta", rejected=prep["rejected"], citations=prep.get("citations") or [],
+                            agent_route=agent_route, context_tokens=0, history_tokens=0,
+                            cache_ref=False, memory_hits=0, low_confidence=False)
+                if agent_answer:
+                    yield event("delta", text=agent_answer)
+            elif rejected:
                 answer = "资料中未找到相关内容"
                 yield event("meta", rejected=True, message=answer, reason=reject_reason, citations=[])
                 answer_buf.append(answer)

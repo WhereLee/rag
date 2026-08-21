@@ -66,8 +66,11 @@ def _vector_search(user_id: int, query: str, top_n: int = VECTOR_TOP_N,
         "SELECT c.id, c.file_id, uf.filename, c.chunk_type, c.content, "
         "c.heading_path, c.page_no, 1 - (c.embedding <=> %s::vector) AS sim "
         "FROM rag_chunk c JOIN user_file uf ON uf.id = c.file_id "
-        "WHERE uf.user_id=%s AND uf.status=1 AND c.embedding IS NOT NULL ")
-    params: list = [qvec, user_id]
+        "WHERE uf.status=1 AND c.embedding IS NOT NULL ")
+    params: list = [qvec]
+    if user_id is not None:
+        sql += "AND uf.user_id=%s "
+        params.append(user_id)
     if dir_id is not None:
         sql += "AND uf.dir_id=%s "
         params.append(dir_id)
@@ -89,8 +92,11 @@ def _bm25_search(user_id: int, query: str, top_n: int = BM25_TOP_N,
         "SELECT c.id, c.file_id, uf.filename, c.chunk_type, c.content, "
         "c.heading_path, c.page_no "
         "FROM rag_chunk c JOIN user_file uf ON uf.id = c.file_id "
-        "WHERE uf.user_id=%s AND uf.status=1")
-    params: list = [user_id]
+        "WHERE uf.status=1")
+    params: list = []
+    if user_id is not None:
+        sql += " AND uf.user_id=%s"
+        params.append(user_id)
     if dir_id is not None:
         sql += " AND uf.dir_id=%s"
         params.append(dir_id)

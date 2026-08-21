@@ -24,7 +24,7 @@ import config
 from agent.state import AgentState
 from llm.mimo_client import get_client, LLMError
 from llm.prompt_loader import fill
-from retrieval.hybrid import hybrid_search
+from retrieval.retriever import retrieve as rag_retrieve, RetrievedChunk
 from observability.tracing import span
 
 logger = logging.getLogger("rag.graph")
@@ -109,6 +109,15 @@ def decompose_node(state: AgentState) -> dict:
             "stages": _stage(state, "decompose", t0, n=len(subs))}
 
 
+def _to_hit(c: RetrievedChunk) -> dict:
+    """新链路 RetrievedChunk → 图内通用 hit dict（doc_name 兼容旧引用组装）。"""
+    return {"chunk_id": c.chunk_id, "content": c.content,
+            "chunk_type": c.chunk_type, "page_no": c.page_no,
+            "document_id": c.file_id, "doc_name": c.filename,
+            "heading_path": c.heading_path, "score": c.score,
+            "reranked": c.reranked}
+
+
 def _retrieve_multi(original_query: str, sub_queries: list[str],
                     user_id: int | None = None) -> tuple[dict[int, dict], bool]:
     """多子查询检索：并行粗筛（无精排，避免 reranker 信号量排队雪崩）
@@ -116,15 +125,20 @@ def _retrieve_multi(original_query: str, sub_queries: list[str],
 
     与原串行实现相比：rerank 从 N 次降为 1 次（省 CPU），粗筛并行缩短墙钟时间。
     降级口径：rerank 失败/超时 → RRF 顺序 + low_conf=True（诚实标记，生成层强化拒答）。
+    检索源：新链路 retriever（rag_chunk，用户隔离 JOIN user_file）。
     """
     from concurrent.futures import ThreadPoolExecutor
     from retrieval.reranker import rerank, RerankBusyError
 
+    def _coarse(q: str) -> list[dict]:
+        chunks = rag_retrieve(user_id, q, top_k=config.VECTOR_TOP_K, use_rerank=False)
+        return [_to_hit(c) for c in chunks]
+
     all_hits: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=min(3, len(sub_queries))) as pool:
-        results = list(pool.map(lambda q: hybrid_search(q, use_rerank=False, user_id=user_id), sub_queries))
-    for result in results:
-        for h in result["hits"]:
+        results = list(pool.map(_coarse, sub_queries))
+    for hits in results:
+        for h in hits:
             cid = h["chunk_id"]
             if cid not in all_hits:
                 all_hits[cid] = h
@@ -167,10 +181,11 @@ def retrieve_node(state: AgentState) -> dict:
         # 多子查询：并行粗筛 + 单次精排（complex 档主路径）
         all_hits, low_conf = _retrieve_multi(state["query"], queries, user_id)
     else:
-        result = hybrid_search(queries[0], user_id=user_id)
-        low_conf = result["low_confidence"]
-        for h in result["hits"]:
-            all_hits[h["chunk_id"]] = h
+        chunks = rag_retrieve(user_id, queries[0], top_k=config.FINAL_TOP_K, use_rerank=True)
+        low_conf = bool(chunks) and (not chunks[0].reranked
+                                     or chunks[0].score < config.RERANK_LOW)
+        for c in chunks:
+            all_hits[c.chunk_id] = _to_hit(c)
     hits = sorted(all_hits.values(), key=lambda x: -x["score"])[:config.FINAL_TOP_K]
     return {"hits": hits, "low_confidence": low_conf,
             "retrieval_round": state.get("retrieval_round", 0) + 1,
@@ -524,7 +539,8 @@ def run_agent_eval(query: str) -> dict:
     total_ms = int((time.perf_counter() - t0) * 1000)
     hits = final.get("hits") or []
     citations = [{"index": i + 1, "chunk_id": h["chunk_id"],
-                  "doc_name": h["doc_name"], "page_no": h["page_no"] + 1,
+                  "doc_name": h.get("doc_name") or h.get("filename") or "未知文档",
+                  "page_no": (h.get("page_no") + 1) if h.get("page_no") is not None else None,
                   "score": h["score"]} for i, h in enumerate(hits)]
     route = final.get("route", "standard")
     final_route = final.get("final_route") or (
@@ -558,7 +574,8 @@ def _run_agent_inner(query: str, session_id: str, history: list,
     total_ms = int((time.perf_counter() - t0) * 1000)
     hits = final.get("hits") or []
     citations = [{"index": i + 1, "chunk_id": h["chunk_id"],
-                  "doc_name": h["doc_name"], "page_no": h["page_no"] + 1,
+                  "doc_name": h.get("doc_name") or h.get("filename") or "未知文档",
+                  "page_no": (h.get("page_no") + 1) if h.get("page_no") is not None else None,
                   "score": h["score"]} for i, h in enumerate(hits)]
     route = final.get("route", "standard")
     final_route = final.get("final_route") or (
