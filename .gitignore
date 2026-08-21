@@ -16,7 +16,7 @@ logs/
 *.log
 _*.txt
 _*.json
-_*.py
+scripts/_*.py
 
 # IDE / Agent 临时文件
 .reasonix/
