@@ -20,6 +20,8 @@ dependencies = [
     # 文档解析
     "pymupdf",
     "python-docx",
+    "openpyxl",
+    "python-pptx",
     # 本地推理
     "onnxruntime",
     "optimum",
