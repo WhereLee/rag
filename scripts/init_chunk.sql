@@ -21,6 +21,8 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunk_embedding
   ON rag_chunk USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL;
 
 ALTER TABLE parse_tasks ADD COLUMN IF NOT EXISTS chunk_count INT;
+ALTER TABLE parse_tasks ADD COLUMN IF NOT EXISTS stage TEXT;
+ALTER TABLE parse_tasks ADD COLUMN IF NOT EXISTS progress REAL;
 
 -- ========== 目录体系 + 问答存档（目录-对话-存档计划 P1/P3） ==========
 -- 单层目录：目录名同用户唯一；非空目录禁删（应用层约束）

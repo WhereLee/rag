@@ -25,6 +25,25 @@ STALE_MINUTES = 5      # parsing 停留超时回收（worker 崩溃恢复）
 MAX_ATTEMPTS = 3       # 自动重试上限（手动重试不受限）
 TIMEOUT = 300          # 单文件解析超时（多图文档 VLM 描述是预期成本，180s 对 6+ 图偏紧）
 
+_last_report_ts = 0.0  # 页级进度写库节流（高频回调不刷库）
+
+
+def _progress(file_id: int, stage: str, progress: float, force: bool = False) -> None:
+    """阶段/进度回报写 parse_tasks（前端轮询展示）。
+
+    force=True：阶段切换（chunking/embedding/indexing）必须落库；
+    force=False：页级高频回调按 1s 节流（50 页 PDF 只写 ~几十次而非每页）。
+    """
+    global _last_report_ts
+    now = time.time()
+    if not force and now - _last_report_ts < 1.0:
+        return
+    _last_report_ts = now
+    with connect() as conn:
+        conn.execute(
+            "UPDATE parse_tasks SET stage=%s, progress=%s, updated_at=now() "
+            "WHERE file_id=%s", (stage, progress, file_id))
+
 
 def recover_stale() -> None:
     """崩溃恢复：parsing 状态停留超过阈值 → 置回 pending。"""
@@ -56,7 +75,7 @@ def _finish(file_id: int, status: str, error: str, duration_ms: int, node_count:
     with connect() as conn:
         conn.execute(
             "UPDATE parse_tasks SET status=%s, error=%s, duration_ms=%s, node_count=%s, "
-            "chunk_count=%s, "
+            "chunk_count=%s, stage='done', progress=1.0, "
             "attempt = CASE WHEN %s='failed' THEN attempt + 1 ELSE attempt END, updated_at=now() "
             "WHERE file_id=%s",
             (status, error, duration_ms, node_count, chunk_count, status, file_id))
@@ -65,6 +84,7 @@ def _finish(file_id: int, status: str, error: str, duration_ms: int, node_count:
 def process_task(task: dict) -> None:
     """解析单个任务：产物 JSON 落盘 + 状态更新（幂等，可安全重跑）。"""
     file_id, blob_id = task["file_id"], task["blob_id"]
+    _progress(file_id, "parsing", 0.05, force=True)  # 起始进度（前端立即可见）
     with connect() as conn:
         blob = conn.execute(
             "SELECT stored_name, owner_user_id FROM file_blob WHERE id=%s", (blob_id,)).fetchone()
@@ -77,7 +97,8 @@ def process_task(task: dict) -> None:
         _finish(file_id, "failed", "物理文件缺失", 0, 0)
         return
 
-    result = parse_file(path, timeout=TIMEOUT)
+    result = parse_file(path, timeout=TIMEOUT,
+                        progress_cb=lambda s, p, d: _progress(file_id, s, p))
     payload = {
         "file_id": file_id,
         "status": result.status,
@@ -95,7 +116,8 @@ def process_task(task: dict) -> None:
     # 解析成功（含部分降级）→ 链式入库（切块+embedding+写 rag_chunk）；入库失败标 failed 可重试
     if result.status in ("success", "partial"):
         try:
-            chunk_count = ingest(file_id, result.nodes)
+            chunk_count = ingest(file_id, result.nodes,
+                                 progress_cb=lambda s, p: _progress(file_id, s, p, force=True))
         except Exception as e:
             logger.exception("ingest failed file_id=%s: %s", file_id, e)
             _finish(file_id, "failed", f"入库失败: {e}", payload["duration_ms"],

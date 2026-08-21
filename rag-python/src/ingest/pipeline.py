@@ -11,6 +11,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,7 +99,14 @@ mod = importlib.import_module("ingest.parser")
 parser = getattr(mod, cls_name)()
 t0 = time.time()
 try:
-    nodes = parser.parse(path)
+    # PDF 页级进度经 stderr 回传（主进程 Popen 边跑边读；其他格式无页概念不发）
+    if cls_name == "PdfParser":
+        def _prog(done, total):
+            print("RAG_PROGRESS " + json.dumps({{'done': done, 'total': total}}),
+                  file=sys.stderr, flush=True)
+        nodes = parser.parse(path, progress_cb=_prog)
+    else:
+        nodes = parser.parse(path)
     from ingest.clean.cleaner import clean_nodes
     nodes = clean_nodes(nodes)
     from ingest.quality import validate_nodes
@@ -115,8 +123,12 @@ print(json.dumps(out, ensure_ascii=False))
 
 # ---------- 对外入口 ----------
 
-def parse_file(path: Path, timeout: int = DEFAULT_TIMEOUT) -> ParseResult:
-    """单文件完整管线：判定 → 魔数 → 上限 → 子进程解析+清洗+校验 → 状态。"""
+def parse_file(path: Path, timeout: int = DEFAULT_TIMEOUT,
+               progress_cb=None) -> ParseResult:
+    """单文件完整管线：判定 → 魔数 → 上限 → 子进程解析+清洗+校验 → 状态。
+
+    progress_cb(stage, progress, detail)：可选三参回调（进度回报，PDF 页级经 stderr 回传）。
+    """
     path = Path(path)
     t0 = time.time()
     try:
@@ -131,17 +143,56 @@ def parse_file(path: Path, timeout: int = DEFAULT_TIMEOUT) -> ParseResult:
     cmd = [sys.executable, "-c",
            _CHILD_SCRIPT.format(src=src_dir), str(path), PARSER_MAP[ext]]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                              timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8",
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as e:
+        return ParseResult(file=path.name, status="failed", error=f"子进程启动失败: {e}",
+                           duration=round(time.time() - t0, 3))
+
+    # stdout/stderr 均用读线程（防管道满阻塞）：主流程先 wait(timeout) 保证超时 kill 生效，
+    # 读线程边跑边解析 stderr 的 RAG_PROGRESS 页级进度行回调 progress_cb
+    stdout_lines: list[str] = []
+
+    def _drain_stdout() -> None:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+
+    def _drain_stderr() -> None:
+        for line in proc.stderr:
+            line = line.strip()
+            if not line.startswith("RAG_PROGRESS "):
+                continue
+            try:
+                d = json.loads(line[len("RAG_PROGRESS "):])
+                if progress_cb and d.get("total"):
+                    # 页级进度映射到解析阶段区间 5%~45%（与旧同步路径区间约定一致）
+                    progress_cb("parsing",
+                                round(0.05 + 0.40 * d["done"] / d["total"], 3), d)
+            except Exception:
+                pass  # 进度行损坏不影响解析结果
+
+    reader = threading.Thread(target=_drain_stdout, daemon=True)
+    stderr_reader = threading.Thread(target=_drain_stderr, daemon=True)
+    reader.start()
+    stderr_reader.start()
+
+    try:
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
         logger.error("解析超时: %s (>%ds)", path.name, timeout)
         return ParseResult(file=path.name, status="failed", error=f"解析超时（>{timeout}s）",
                            duration=round(time.time() - t0, 3))
+    reader.join(timeout=5)
+    stderr_reader.join(timeout=5)
+    stdout = "".join(stdout_lines)
 
     try:
-        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        data = json.loads(stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        logger.error("子进程输出异常: %s: %s", path.name, proc.stdout[-300:])
+        logger.error("子进程输出异常: %s: %s", path.name, stdout[-300:])
         return ParseResult(file=path.name, status="failed", error="解析子进程输出异常",
                            duration=round(time.time() - t0, 3))
 

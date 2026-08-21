@@ -159,7 +159,8 @@ class PdfParser(Parser):
         self.page_text_threshold = page_text_threshold
         self.max_pages = max_pages
 
-    def parse(self, path: Path) -> List[DocumentNode]:
+    def parse(self, path: Path, progress_cb=None) -> List[DocumentNode]:
+        """解析 PDF。progress_cb(done, total)：按完成页数递增（文本型逐页 / 扫描型逐页转录）。"""
         path = Path(path)
         doc = pymupdf.open(path)
         try:
@@ -177,17 +178,19 @@ class PdfParser(Parser):
             if avg_chars < self.page_text_threshold and (total_images > 0 or total_chars == 0):
                 if self.vlm is None:
                     raise ParseError(f"{path.name}: 扫描型 PDF（页均字符 {avg_chars}），未配置 VLM 无法转录")
-                return self._parse_scanned(doc, path.name)  # R4：VLM 整页转录
+                return self._parse_scanned(doc, path.name, progress_cb)  # R4：VLM 整页转录
             nodes: List[DocumentNode] = []
             for pno, page in enumerate(doc, 1):
                 nodes.extend(self._parse_page(page, pno, path.name))
+                if progress_cb:
+                    progress_cb(pno, doc.page_count)
             nodes = remove_headers_footers(nodes, doc.page_count, doc[0].rect.height)
             return merge_broken_lines(nodes)
         finally:
             doc.close()
 
     # ---- 扫描型：整页渲染 → VLM 转录（每页一个节点，失败占位不中断） ----
-    def _parse_scanned(self, doc: pymupdf.Document, source: str) -> List[DocumentNode]:
+    def _parse_scanned(self, doc: pymupdf.Document, source: str, progress_cb=None) -> List[DocumentNode]:
         if self.vlm is None:
             self.vlm = _default_vlm()
         nodes: List[DocumentNode] = []
@@ -202,6 +205,8 @@ class PdfParser(Parser):
                 text = "[该页解析失败]"
             nodes.append(DocumentNode("paragraph", text,
                                       {"source": source, "page": pno, "index": len(nodes)}))
+            if progress_cb:
+                progress_cb(pno, doc.page_count)
         return nodes
 
     # ---- 单页：块提取 + 排序拼回 ----

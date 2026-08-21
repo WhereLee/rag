@@ -29,15 +29,22 @@ def embed_texts(chunks: List[Chunk]) -> List[str]:
             for c in chunks]
 
 
-def ingest(file_id: int, nodes: List[DocumentNode]) -> int:
-    """解析产物入库。返回块数；任何失败抛异常（由调用方决定状态），DB 无残留。"""
+def ingest(file_id: int, nodes: List[DocumentNode], progress_cb=None) -> int:
+    """解析产物入库。返回块数；任何失败抛异常（由调用方决定状态），DB 无残留。
+
+    progress_cb(stage, progress)：阶段回报（chunking→embedding→indexing），可选。
+    """
     chunks = chunk_nodes(nodes)
     if not chunks:
         # 无可检索内容（空文档/纯标题）：不产生块，仍标记成功（解析本身有效）
         _record_chunk_count(file_id, 0)
         return 0
+    if progress_cb:
+        progress_cb("chunking", 0.45)
 
     texts = embed_texts(chunks)
+    if progress_cb:
+        progress_cb("embedding", 0.50)
     vectors = embed_batch(texts)   # 事务外先算向量（避免长事务）；失败直接抛
     if len(vectors) != len(chunks):
         raise RuntimeError(f"embedding 数量不一致: {len(vectors)} != {len(chunks)}")
@@ -58,6 +65,8 @@ def ingest(file_id: int, nodes: List[DocumentNode]) -> int:
                 (file_id, c.chunk_type, c.seq, c.content, c.chars,
                  c.heading_path, c.page_no, vec, EMBED_MODEL))
         _record_chunk_count(file_id, len(chunks), conn)
+    if progress_cb:
+        progress_cb("indexing", 0.90)
     # 文件重新入库（reparse）→ 关联问答存档失效（块变了，旧答案不可信）
     try:
         with connect() as conn:

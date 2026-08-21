@@ -259,7 +259,8 @@ public class FileService {
         if (dirId == null) {
             items = jdbc.queryForList(
                     "SELECT uf.id, uf.filename, uf.file_size, uf.content_type, uf.created_at, " +
-                    "       pt.status AS parse_status, pt.error AS parse_error, pt.node_count AS parse_node_count " +
+                    "       pt.status AS parse_status, pt.error AS parse_error, pt.node_count AS parse_node_count, " +
+                    "       pt.stage AS parse_stage, pt.progress AS parse_progress " +
                     "FROM user_file uf " +
                     "LEFT JOIN parse_tasks pt ON pt.file_id = uf.id " +
                     "WHERE uf.user_id=? AND uf.status=1 ORDER BY uf.id DESC LIMIT ? OFFSET ?",
@@ -273,7 +274,8 @@ public class FileService {
             }
             items = jdbc.queryForList(
                     "SELECT uf.id, uf.filename, uf.file_size, uf.content_type, uf.created_at, " +
-                    "       pt.status AS parse_status, pt.error AS parse_error, pt.node_count AS parse_node_count " +
+                    "       pt.status AS parse_status, pt.error AS parse_error, pt.node_count AS parse_node_count, " +
+                    "       pt.stage AS parse_stage, pt.progress AS parse_progress " +
                     "FROM user_file uf " +
                     "LEFT JOIN parse_tasks pt ON pt.file_id = uf.id " +
                     "WHERE uf.user_id=? AND uf.status=1 AND uf.dir_id=? ORDER BY uf.id DESC LIMIT ? OFFSET ?",

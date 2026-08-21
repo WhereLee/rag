@@ -57,9 +57,18 @@
               <el-table-column label="上传时间" width="160" align="center">
                 <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
               </el-table-column>
-              <el-table-column label="解析状态" width="100" align="center">
+              <el-table-column label="解析状态" width="150" align="center">
                 <template #default="{ row }">
-                  <el-tag :type="parseTagType(row.parse_status)" size="small" effect="light">
+                  <template v-if="row.parse_status === 'parsing'">
+                    <el-progress :percentage="parsePercent(row)" :stroke-width="6" :show-text="false" />
+                    <div class="parse-stage">{{ parseStageLabel(row.parse_stage) }} {{ parsePercent(row) }}%</div>
+                  </template>
+                  <el-tooltip v-else-if="parseError(row)" :content="row.parse_error" placement="top">
+                    <el-tag :type="parseTagType(row.parse_status)" size="small" effect="light">
+                      {{ parseLabel(row.parse_status) }}
+                    </el-tag>
+                  </el-tooltip>
+                  <el-tag v-else :type="parseTagType(row.parse_status)" size="small" effect="light">
                     {{ parseLabel(row.parse_status) }}
                   </el-tag>
                 </template>
@@ -176,8 +185,28 @@ const PARSE_LABELS = {
   pending: '待解析', parsing: '解析中', success: '已解析', partial: '部分失败', failed: '失败'
 }
 
+const PARSE_STAGES = {
+  parsing: '解析中', chunking: '切块中', embedding: '向量化中', indexing: '入库中', done: '完成'
+}
+
 function parseLabel(s) {
   return PARSE_LABELS[s] || '待解析'
+}
+
+function parseStageLabel(s) {
+  return PARSE_STAGES[s] || '解析中'
+}
+
+// 进度 0~1 → 百分比（后端可能还没回报字段，兜底按 5% 起步）
+function parsePercent(row) {
+  const p = Number(row.parse_progress)
+  if (!isFinite(p) || p <= 0) return 5
+  return Math.min(100, Math.round(p * 100))
+}
+
+// 失败/部分失败的错误原因（后端 parse_error 已返回，悬浮展示）
+function parseError(row) {
+  return (row.parse_status === 'failed' || row.parse_status === 'partial') && row.parse_error
 }
 
 function parseTagType(s) {
@@ -517,6 +546,7 @@ function formatDate(dt) {
 .docs-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .docs-header h2 { font-size: 18px; color: #303133; }
 .upload-progress { margin-left: 10px; font-size: 12px; color: #909399; }
+.parse-stage { font-size: 12px; color: #606266; margin-top: 2px; line-height: 1.2; }
 .pagination-wrap { display: flex; justify-content: flex-end; margin-top: 16px; }
 .preview-body { max-height: 65vh; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
   font-size: 14px; line-height: 1.8; color: #303133; }
