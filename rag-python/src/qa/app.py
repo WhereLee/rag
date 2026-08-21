@@ -273,7 +273,8 @@ def _prepare_ask(req: AskRequest, user_id: int) -> dict:
             "rejected": rejected, "reject_reason": reject_reason,
             "cache_ref": cache_ref, "qvec": qvec,
             "memories": memories, "history": history,
-            "hist_text": hist_text, "hist_tokens": hist_tokens}
+            "hist_text": hist_text, "hist_tokens": hist_tokens,
+            "q_hash": q_hash}
 
 
 @app.post("/qa/sessions")
@@ -399,6 +400,7 @@ async def ask(req: AskRequest, x_user_id: str = Header(default="")):
     reject_reason = prep["reject_reason"]
     cache_ref = prep["cache_ref"]
     qvec = prep["qvec"]
+    q_hash = prep["q_hash"]
     memories = prep["memories"]
     hist_text = prep["hist_text"]
     hist_tokens = prep["hist_tokens"]
