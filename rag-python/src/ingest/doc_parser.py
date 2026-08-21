@@ -81,9 +81,20 @@ def parse_markdown(path: Path) -> tuple[list[dict], dict]:
 
 def parse_image_file(path: Path) -> tuple[list[dict], dict]:
     png_bytes = path.read_bytes()
-    info = vlm.parse_image(png_bytes)
+    info, meta = vlm.parse_image(png_bytes)
     page = {"page_no": 0, "channel": "IMG", "text": "",
             "tables": [], "images": [info]}
     stats = {"page_count": 1, "channels": {"IMG": 1},
-             "vlm_calls": 1, "figures_parsed": 1, "failed_pages": []}
+             "vlm_calls": 1, "figures_parsed": 1, "failed_pages": [],
+             "vlm_details": [{"type": "image", **meta}], "page_errors": {}}
+    return [page], stats
+
+
+def parse_text(path: Path) -> tuple[list[dict], dict]:
+    """解析纯文本文件：将整个文件内容作为单页返回。"""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    page = {"page_no": 0, "channel": "TXT", "text": text,
+            "tables": [], "images": []}
+    stats = {"page_count": 1, "channels": {"TXT": 1},
+             "vlm_calls": 0, "figures_parsed": 0, "failed_pages": []}
     return [page], stats

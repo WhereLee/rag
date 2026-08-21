@@ -3,6 +3,7 @@ package com.rag.gateway;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 智能文档问答系统 Java 薄网关。
@@ -12,6 +13,7 @@ import org.springframework.scheduling.annotation.EnableAsync;
  */
 @SpringBootApplication
 @EnableAsync   // 审计日志异步写入
+@EnableScheduling   // 孤儿文件清理等定时任务
 public class RagGatewayApplication {
     public static void main(String[] args) {
         SpringApplication.run(RagGatewayApplication.class, args);

@@ -4,22 +4,50 @@ server:
 spring:
   application:
     name: rag-gateway
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
   datasource:
     url: jdbc:postgresql://localhost:5432/rag_kb
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
-    password: ${SPRING_DATASOURCE_PASSWORD:root}
+    # 无默认值：缺失时启动失败（SecurityStartupValidator fail-fast），防部署时静默使用默认密码
+    password: ${SPRING_DATASOURCE_PASSWORD:}
     hikari:
       maximum-pool-size: 10
 
 gateway:
+  security:
+    # 可信反向代理（逗号分隔的 IP/CIDR，如 nginx 所在主机）。默认空=不信任 X-Forwarded-For，
+    # 客户端伪造 XFF 无法绕过 IP 限流（坑位 #1）；配置后按标准语义从右往左取第一个非代理 IP
+    trusted-proxies: ${GATEWAY_TRUSTED_PROXIES:}
   python:
     base-url: http://127.0.0.1:8090
   jwt:
-    secret: ${GATEWAY_JWT_SECRET:rag-gateway-local-dev-secret-change-me}
+    # 无默认值：缺失时启动失败，防部署时静默使用可猜测的默认 secret（可被伪造 JWT）
+    secret: ${GATEWAY_JWT_SECRET:}
     ttl-hours: 8
   rate-limit:
     per-minute: 20
-  internal-api-key: ${GATEWAY_INTERNAL_API_KEY:rag-internal-dev-key-2026}
+  # 无默认值：缺失时启动失败；优先 GATEWAY_INTERNAL_API_KEY，回退 INTERNAL_API_KEY（与 Python 侧 .env 同一变量，保证两侧一致）
+  internal-api-key: ${GATEWAY_INTERNAL_API_KEY:${INTERNAL_API_KEY:}}
+  storage:
+    root: ${STORAGE_ROOT:../data/files}
+  upload:
+    rate-per-minute: ${GATEWAY_UPLOAD_RATE_PER_MINUTE:10}
+    quota-bytes: ${GATEWAY_UPLOAD_QUOTA_BYTES:2147483648}
+    # 允许上传的扩展名白名单（与 Python 解析域支持范围一致；解析不了的直接不让上传）
+    allowed-extensions: ${GATEWAY_UPLOAD_ALLOWED_EXTENSIONS:txt,md,pdf,docx,xlsx,pptx,png,jpg,jpeg,webp}
+    # 磁盘空间下限：剩余空间低于绝对字节或剩余比例时拒绝上传（含分片 init/complete）
+    min-free-bytes: ${GATEWAY_UPLOAD_MIN_FREE_BYTES:1073741824}
+    min-free-ratio: ${GATEWAY_UPLOAD_MIN_FREE_RATIO:0.05}
+  cleanup:
+    interval-ms: ${GATEWAY_CLEANUP_INTERVAL_MS:3600000}
+    tmp-ttl-ms: ${GATEWAY_CLEANUP_TMP_TTL_MS:3600000}
+    trash-ttl-ms: ${GATEWAY_CLEANUP_TRASH_TTL_MS:2592000000}
+    session-ttl-ms: ${GATEWAY_CLEANUP_SESSION_TTL_MS:3600000}
+    # 磁盘告警阈值：剩余比例低于该值每小时 WARN 一次（随清理任务执行）
+    warn-free-ratio: ${GATEWAY_CLEANUP_WARN_FREE_RATIO:0.10}
   cors:
     allowed-origins: ${GATEWAY_CORS_ORIGINS:http://localhost:3000}
 

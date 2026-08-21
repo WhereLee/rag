@@ -8,11 +8,20 @@
 """
 import json
 import logging
+import threading
 
 from db import pg_store
 from llm.mimo_client import get_client, LLMError
 
 logger = logging.getLogger("rag.feedback")
+
+
+def _safe_attribute(bc_id: int) -> None:
+    """后台线程执行归因：LLM 调用耗时 20-60s，同步会拖垮提交响应（网关 30s 超时截断）。"""
+    try:
+        attribute(bc_id)
+    except Exception as e:
+        logger.warning("auto attribution failed: %s", e)
 
 ATTR_PROMPT = """用户对问答系统的回答不满意。请判断问题出在哪个阶段：
 - retrieval：检索到的资料里没有能回答问题的内容（需要改进检索/切块/embedding）
@@ -43,12 +52,8 @@ def submit_feedback(qa_log_id: int, rating: int, correction: str = "",
                VALUES (%s,%s,%s,%s,'pending','open') RETURNING id""",
             (qa_log_id, user_id, qa["query"], json.dumps(snapshot, ensure_ascii=False)))["id"]
         result["bad_case_id"] = bc_id
-        # 立即尝试自动归因（失败不阻塞，保留 pending）
-        try:
-            attr = attribute(bc_id)
-            result["attribution"] = attr
-        except Exception as e:
-            logger.warning("auto attribution failed: %s", e)
+        # 异步自动归因（LLM 20-60s）：提交立即返回，归因结果稍后可见于 bad case 列表
+        threading.Thread(target=_safe_attribute, args=(bc_id,), daemon=True).start()
     return result
 
 

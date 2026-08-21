@@ -26,7 +26,10 @@ public class AuthFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest req) {
         String uri = req.getRequestURI();
-        return uri.startsWith("/api/auth/") || uri.equals("/health") || uri.startsWith("/error");
+        // /api/auth/**（注册登录）、/health、Swagger UI 与 OpenAPI 文档免鉴权
+        return uri.startsWith("/api/auth/") || uri.equals("/health") || uri.startsWith("/error")
+                || uri.startsWith("/swagger-ui") || uri.equals("/swagger-ui.html")
+                || uri.startsWith("/v3/api-docs") || uri.startsWith("/webjars");
     }
 
     @Override

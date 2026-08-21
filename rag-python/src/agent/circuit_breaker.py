@@ -97,9 +97,22 @@ class CircuitBreaker:
         }
 
 
-# 全局单例（单进程足够；多进程/分布式换 Redis 实现）
-_llm_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+# 按用途实例化：问答 / 入库 VLM 各自独立熔断，互不干扰
+_breakers: dict[str, CircuitBreaker] = {}
+_breakers_lock = threading.Lock()
+
+# 用途参数：问答重试便宜（threshold 3）；入库 VLM 调用贵且对成本敏感（threshold 5，少误伤）
+_BREAKER_PARAMS = {
+    "qa":        {"failure_threshold": 3, "recovery_timeout": 60},
+    "vlm_ingest": {"failure_threshold": 5, "recovery_timeout": 120},
+}
 
 
-def get_breaker() -> CircuitBreaker:
-    return _llm_breaker
+def get_breaker(name: str = "qa") -> CircuitBreaker:
+    """按用途获取断路器实例（线程安全懒加载）。默认 'qa' 兼容历史调用。"""
+    global _breakers
+    if name not in _breakers:
+        with _breakers_lock:
+            if name not in _breakers:
+                _breakers[name] = CircuitBreaker(**_BREAKER_PARAMS.get(name, _BREAKER_PARAMS["qa"]))
+    return _breakers[name]

@@ -30,7 +30,8 @@ LLM_TIMEOUT = _int("LLM_TIMEOUT", 120)          # 单次调用超时（秒）
 LLM_MAX_RETRIES = _int("LLM_MAX_RETRIES", 2)    # 失败重试次数
 
 # --- 数据层 ---
-PG_DSN = os.getenv("PG_DSN", "postgresql://postgres:root@localhost:5432/rag_kb")
+# 数据库连接串：无默认值（防部署时静默使用默认密码/默认库）；缺失时启动 fail-fast
+PG_DSN = os.getenv("PG_DSN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 PG_POOL_MIN = _int("PG_POOL_MIN", 5)
 PG_POOL_MAX = _int("PG_POOL_MAX", 20)
@@ -38,7 +39,9 @@ PG_POOL_MAX = _int("PG_POOL_MAX", 20)
 # --- 本地推理 ---
 EMBED_DIM = _int("EMBED_DIM", 768)
 EMBED_MODEL_DIR = os.getenv("EMBED_MODEL_DIR", "bge-base-zh-v1.5-onnx-int8")
-RERANK_MODEL_DIR = os.getenv("RERANK_MODEL_DIR", "bge-reranker-v2-m3-onnx-int8")
+# rerank 默认用 base（黄金集对比实验：候选 50→20 + base 质量零损失、延迟 -83%、内存 -277MB）；
+# 语料扩展后回归退化可经 env 切回 v2-m3（RERANK_TOP_N 保持 20，无需回 50）
+RERANK_MODEL_DIR = os.getenv("RERANK_MODEL_DIR", "bge-reranker-base-onnx-int8")
 EMBED_BATCH_SIZE = _int("EMBED_BATCH_SIZE", 32)
 ONNX_THREADS = _int("ONNX_THREADS", 8)          # P 核绑定（i5-12500H）
 
@@ -83,10 +86,14 @@ _logger = _logging.getLogger("rag.security")
 def _check_security_config():
     """检测敏感配置是否使用默认值，生产环境拒绝启动。"""
     warnings = []
+    if not PG_DSN:
+        # 与 Java 网关（SPRING_DATASOURCE_PASSWORD 无默认值 + fail-fast）对齐：
+        # 数据库连接串不应有代码内默认值，缺失说明部署配置遗漏，直接拒绝启动
+        raise RuntimeError("PG_DSN 未设置（无默认值，防静默使用默认密码/默认库），请检查 .env")
     if not INTERNAL_API_KEY:
         warnings.append("INTERNAL_API_KEY 未设置，仅允许 localhost 访问")
     if "root" in PG_DSN and "localhost" in PG_DSN:
-        warnings.append("PG_DSN 使用默认密码 'root'")
+        warnings.append("PG_DSN 使用默认密码 'root'（本地开发库；生产必须更换）")
     if not MIMO_API_KEY:
         warnings.append("MIMO_API_KEY 未设置，LLM 功能不可用")
 

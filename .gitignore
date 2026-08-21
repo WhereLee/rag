@@ -20,6 +20,15 @@ _*.py
 
 # IDE / Agent 临时文件
 .reasonix/
+.qoder/
+
+# 调试材料
+E2E_ISSUE_NEW.pdf
+
+# 运行时数据（上传物理文件/任务文件，不入库）
+data/files/
+data/jobs/
+data/browser_upload/
 
 # VLM 解析缓存（按图片 hash 落盘，不入库）
 data/parsed/

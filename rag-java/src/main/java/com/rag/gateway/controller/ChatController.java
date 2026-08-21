@@ -67,8 +67,10 @@ public class ChatController {
         } catch (Exception e) {
             audit.record(username, "chat.ask", String.valueOf(body.get("query")), 502,
                     System.currentTimeMillis() - t0);
+            String rid = (String) req.getAttribute("X-Request-ID");
             return ResponseEntity.status(502).body(Map.of(
-                    "error", "AI 服务暂不可用: " + rootMsg(e)));
+                    "error", "AI 服务暂不可用: " + rootMsg(e),
+                    "trace_id", rid != null ? rid : ""));
         }
     }
 
@@ -78,8 +80,10 @@ public class ChatController {
                                                    HttpServletRequest req) {
         String username = (String) req.getAttribute("username");
         if (!rateLimiter.tryAcquire(username)) {
+            String rid = (String) req.getAttribute("X-Request-ID");
             return Flux.just(ServerSentEvent.<String>builder()
-                    .data("{\"error\":\"请求过于频繁\"}").build());
+                    .data("{\"error\":\"请求过于频繁\",\"trace_id\":\""
+                            + (rid != null ? rid : "") + "\"}").build());
         }
         Long userId = userService.getUserIdByUsername(username);
         String requestId = (String) req.getAttribute("X-Request-ID");
@@ -95,8 +99,12 @@ public class ChatController {
                 .bodyToFlux(String.class)
                 .map(line -> ServerSentEvent.<String>builder().data(line).build())
                 .timeout(Duration.ofMinutes(5))
-                .onErrorResume(e -> Flux.just(ServerSentEvent.<String>builder()
-                        .data("{\"error\":\"流式转发中断: " + rootMsg(e) + "\"}").build()));
+                .onErrorResume(e -> {
+                    String rid = (String) req.getAttribute("X-Request-ID");
+                    String data = "{\"error\":\"流式转发中断: " + jsonEscape(rootMsg(e)) + "\",\"trace_id\":\""
+                            + (rid != null ? rid : "") + "\"}";
+                    return Flux.just(ServerSentEvent.<String>builder().data(data).build());
+                });
     }
 
     @GetMapping("/history/{sessionId}")
@@ -111,7 +119,9 @@ public class ChatController {
             audit.record(username, "chat.history", sessionId, 200, 0);
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
-            return ResponseEntity.status(502).body(Map.of("error", rootMsg(e)));
+            String rid = (String) req.getAttribute("X-Request-ID");
+            return ResponseEntity.status(502).body(Map.of(
+                    "error", rootMsg(e), "trace_id", rid != null ? rid : ""));
         }
     }
 
@@ -119,5 +129,12 @@ public class ChatController {
         Throwable t = e;
         while (t.getCause() != null) t = t.getCause();
         return t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+    }
+
+    /** JSON 字符串转义（错误消息嵌入 SSE JSON 数据用）。 */
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r");
     }
 }

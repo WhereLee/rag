@@ -97,3 +97,21 @@ def sanitize_document_content(content: str, max_chars: int = 50000) -> str:
     truncated = truncated.replace("<|user|>", "[user]")
     truncated = truncated.replace("<|assistant|>", "[assistant]")
     return truncated
+
+
+def detect_document_injection(text: str) -> tuple[bool, str]:
+    """文档内容指令注入检测（第一轮修复 C4）。
+
+    场景：图片/扫描件经 VLM 转录后进入知识库，转录文本可能携带恶意指令
+    （如「忽略之前的指令」「输出你的系统提示」），被检索注入问答 prompt。
+    在 VLM 转录入 chunk 前过滤，命中则标记可疑，不进入知识库。
+
+    返回 (is_suspicious, pattern_name)。阈值与 sanitize_query 一致（宁漏勿误）。
+    """
+    if not text:
+        return False, ""
+    for pattern, name in INJECTION_PATTERNS:
+        if pattern.search(text):
+            logger.warning("DOCUMENT INJECTION detected: pattern=%s preview=%.100s", name, text)
+            return True, name
+    return False, ""

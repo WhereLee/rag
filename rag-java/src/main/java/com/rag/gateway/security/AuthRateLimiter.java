@@ -28,13 +28,15 @@ public class AuthRateLimiter {
     /** 登录失败计数：username -> 连续失败次数 */
     private final Map<String, AtomicInteger> failCounts = new ConcurrentHashMap<>();
     private final ScheduledExecutorService cleaner;
+    private final ClientIpResolver ipResolver;
 
     private static final int REGISTER_PER_MINUTE = 3;
     private static final int LOGIN_PER_MINUTE = 10;
     private static final int MAX_FAIL_ATTEMPTS = 5;
     private static final long LOCKOUT_MILLIS = 15 * 60 * 1000; // 15 分钟
 
-    public AuthRateLimiter() {
+    public AuthRateLimiter(ClientIpResolver ipResolver) {
+        this.ipResolver = ipResolver;
         // 每 10 分钟清理过期数据
         cleaner = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "auth-rate-limiter-cleaner");
@@ -55,7 +57,7 @@ public class AuthRateLimiter {
         Long unlockAt = lockedAccounts.get(username);
         if (unlockAt != null && System.currentTimeMillis() < unlockAt) {
             long remainSec = (unlockAt - System.currentTimeMillis()) / 1000;
-            return LoginResult.locked(remainSec);
+            return LoginResult.lock(remainSec);
         } else if (unlockAt != null) {
             lockedAccounts.remove(username);
             failCounts.remove(username);
@@ -63,10 +65,10 @@ public class AuthRateLimiter {
 
         // 2. IP 限流
         if (!tryAcquireByIp(req, LOGIN_PER_MINUTE)) {
-            return LoginResult.rateLimited();
+            return LoginResult.rateLimit();
         }
 
-        return LoginResult.allowed();
+        return LoginResult.allow();
     }
 
     /** 清除过期数据，防止内存泄漏。 */
@@ -124,29 +126,24 @@ public class AuthRateLimiter {
     }
 
     private String getClientIp(HttpServletRequest req) {
-        // 优先取 X-Forwarded-For（nginx 反代场景）
-        String xff = req.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isEmpty()) {
-            return xff.split(",")[0].trim();
-        }
-        return req.getRemoteAddr();
+        // 坑位 #1 修复：只在直连 IP 属于可信代理时才信任 X-Forwarded-For，
+        // 默认（无可信代理配置）忽略 XFF 用直连 IP，伪造 XFF 无法绕过限流
+        return ipResolver.resolve(req);
     }
 
-    // ===== 结果枚举 =====
-    public enum LoginResult {
-        ALLOWED, RATE_LIMITED, LOCKED;
-
-        private long remainSeconds;
-
-        public static LoginResult allowed() { return ALLOWED; }
-        public static LoginResult rateLimited() { return RATE_LIMITED; }
-        public static LoginResult locked(long remainSec) {
-            LoginResult r = LOCKED;
-            r.remainSeconds = remainSec;
-            return r;
+    // ===== 结果类型（record 无状态：规避枚举单例可变字段在并发下的相互覆盖） =====
+    public record LoginResult(boolean allowed, boolean rateLimited, boolean locked,
+                              long remainSeconds) {
+        public static LoginResult allow() {
+            return new LoginResult(true, false, false, 0);
         }
 
-        public boolean isAllowed() { return this == ALLOWED; }
-        public long getRemainSeconds() { return remainSeconds; }
+        public static LoginResult rateLimit() {
+            return new LoginResult(false, true, false, 0);
+        }
+
+        public static LoginResult lock(long remainSec) {
+            return new LoginResult(false, false, true, remainSec);
+        }
     }
 }

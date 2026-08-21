@@ -31,12 +31,16 @@ public class UserService {
     private static final java.util.regex.Pattern USERNAME_PATTERN =
             java.util.regex.Pattern.compile("^[a-zA-Z0-9_]{2,32}$");
 
-    public Map<String, Object> register(String username, String password, String role) {
+    /** 密码策略：8-32 位字母、数字或常见符号（与 RegisterRequest 一致，Service 层兜底防御）。 */
+    private static final java.util.regex.Pattern PASSWORD_PATTERN =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9@#$%^&*._\\-]{8,32}$");
+
+    public Map<String, Object> register(String username, String password) {
         if (username == null || !USERNAME_PATTERN.matcher(username).matches()) {
             throw new IllegalArgumentException("用户名仅允许字母、数字、下划线，2-32位");
         }
-        if (password == null || password.length() < 6 || password.length() > 128) {
-            throw new IllegalArgumentException("密码长度6-128位");
+        if (password == null || !PASSWORD_PATTERN.matcher(password).matches()) {
+            throw new IllegalArgumentException("密码需为8-32位字母、数字或常见符号（@#$%^&*._-）");
         }
         // 安全加固：注册接口强制 role="user"，忽略前端传入值
         // 管理员账号仅通过 init_db.sql 初始化脚本创建
@@ -46,8 +50,13 @@ public class UserService {
             throw new IllegalArgumentException("用户名已存在");
         }
         String hash = encoder.encode(password);
-        jdbc.update("INSERT INTO kb_user (username, password_hash, salt, role) VALUES (?,?,?,?)",
-                username, hash, "", "user");
+        try {
+            jdbc.update("INSERT INTO kb_user (username, password_hash, salt, role) VALUES (?,?,?,?)",
+                    username, hash, "", "user");
+        } catch (org.springframework.dao.DuplicateKeyException e) {
+            // 并发竞态兑底：SELECT 预检后另一个请求已插入同用户名，唯一约束冲突 → 友好提示
+            throw new IllegalArgumentException("用户名已存在");
+        }
         return Map.of("username", username, "created", true);
     }
 
@@ -66,7 +75,7 @@ public class UserService {
         // 登录时填充缓存
         Long userId = ((Number) u.get("id")).longValue();
         userIdCache.put(username, userId);
-        return Map.of("username", u.get("username"), "role", u.get("role"));
+        return Map.of("id", userId, "username", u.get("username"), "role", u.get("role"));
     }
 
     /** 获取用户 ID（本地缓存优先，未命中时查库）。 */

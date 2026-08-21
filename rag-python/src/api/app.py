@@ -19,34 +19,56 @@ app = FastAPI(
 )
 
 
-# ===== 全局异常处理：错误信息脱敏 =====
+# ===== 全局异常处理：错误信息脱敏 + 携带 trace_id =====
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """捕获未处理的异常，返回通用错误消息，不泄露内部细节。
-    详细错误信息仅记录到日志。"""
+    详细错误信息仅记录到日志。
+    第一轮修复：响应统一携带 trace_id（来自网关 X-Request-ID），用户报障可凭 ID 串查日志。"""
     from fastapi import HTTPException
-    # HTTPException 已经是我们主动抛出的业务错误，保持原样
+    trace_id = getattr(request.state, "request_id", "") or ""
+    # HTTPException 已经是我们主动抛出的业务错误，保持原样（附加 trace_id）
     if isinstance(exc, HTTPException):
-        return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+        return JSONResponse({"error": exc.detail, "trace_id": trace_id},
+                            status_code=exc.status_code)
     # 未预期的异常：记录完整信息到日志，对外只返回通用消息
     logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc,
                  exc_info=True)
     return JSONResponse(
-        {"error": "服务内部错误，请稍后重试"},
+        {"error": "服务内部错误，请稍后重试", "trace_id": trace_id},
         status_code=500
     )
 
 
-# ===== 安全中间件：内部 API Key 验证 =====
+# ===== 安全中间件：内部 API Key 验证 + 网关签名校验 =====
 class InternalAuthMiddleware(BaseHTTPMiddleware):
     """Python 服务纵深防御层。
 
-    策略：
+    策略（第一轮修复强化）：
     - INTERNAL_API_KEY 已配置：验证 X-Internal-Key 请求头（来自网关注入）
     - INTERNAL_API_KEY 未配置：仅允许 localhost 访问（开发环境）
+    - 带 X-User-Id 的请求必须携带 X-Gateway-Sign 签名
+      （HMAC-SHA256(INTERNAL_API_KEY, user_id)，仅网关注入）——
+      前端直连 8090 伪造 X-User-Id 不再可信，多租户隔离的信任边界收口到网关
     - /health 接口始终放行
     - 同时提取 X-Request-ID 注入日志上下文（跨服务关联）
     """
+
+    async def _check_gateway_sign(self, request: Request) -> str | None:
+        """校验网关签名。返回 None=通过；否则返回错误消息。"""
+        uid = request.headers.get("X-User-Id")
+        if uid is None:
+            return None  # 无用户身份声明，无需签名
+        import hashlib
+        provided = request.headers.get("X-Gateway-Sign", "")
+        key = config.INTERNAL_API_KEY
+        if not key:
+            return "网关签名功能未配置（INTERNAL_API_KEY 为空）"
+        expect = hmac.new(key.encode("utf-8"), uid.encode("utf-8"),
+                          hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expect, provided):
+            return "X-Gateway-Sign 签名校验失败"
+        return None
 
     async def dispatch(self, request: Request, call_next):
         # 提取 correlation ID（来自 Java 网关 X-Request-ID）
@@ -75,6 +97,13 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
                     {"error": "Forbidden: direct access not allowed"},
                     status_code=403
                 )
+        # 网关签名校验：带 X-User-Id 的请求必须带签名（防直连伪造用户身份）
+        sign_err = await self._check_gateway_sign(request)
+        if sign_err:
+            return JSONResponse(
+                {"error": f"Forbidden: {sign_err}", "trace_id": request_id},
+                status_code=403
+            )
         return await call_next(request)
 
 

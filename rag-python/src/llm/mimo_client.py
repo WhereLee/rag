@@ -81,7 +81,15 @@ class MiMoClient:
         prompt_summary = ""
         if messages:
             last_msg = messages[-1].get("content", "")
-            prompt_summary = last_msg[:200] + ("..." if len(last_msg) > 200 else "")
+            # 处理多模态消息（content 可能是列表）
+            if isinstance(last_msg, list):
+                # 提取文本部分
+                text_parts = [item.get("text", "") for item in last_msg if isinstance(item, dict) and item.get("type") == "text"]
+                last_msg = " ".join(text_parts)
+            if isinstance(last_msg, str):
+                prompt_summary = last_msg[:200] + ("..." if len(last_msg) > 200 else "")
+            else:
+                prompt_summary = str(last_msg)[:200]
         for attempt in range(config.LLM_MAX_RETRIES + 1):
             start = time.perf_counter()
             try:
@@ -193,11 +201,29 @@ class MiMoClient:
         偶发空响应）；改为提示词约束 + 宽容解析，更稳。
         """
         result = self.chat(messages, thinking=thinking, max_tokens=max_tokens, **extra)
-        text = (result.content or "").strip()
+        return self._parse_json_text((result.content or "").strip())
+
+    def chat_json_verbose(self, messages: list[dict], thinking: bool = False,
+                          max_tokens: int = 2048, **extra) -> tuple[dict, dict]:
+        """chat_json 的带元数据版本：返回 (obj, meta)。
+
+        meta = {token_in, token_out, elapsed_ms, model, finish_reason}
+        供 VLM 调用链路的成本/耗时可观测落库。
+        """
+        result = self.chat(messages, thinking=thinking, max_tokens=max_tokens, **extra)
+        obj = self._parse_json_text((result.content or "").strip())
+        meta = {"token_in": result.token_in, "token_out": result.token_out,
+                "elapsed_ms": result.elapsed_ms, "model": result.model,
+                "finish_reason": result.finish_reason}
+        return obj, meta
+
+    @staticmethod
+    def _parse_json_text(text: str) -> dict:
+        """宽容 JSON 解析：直接解析 → 提取首尾花括号块。失败抛 LLMError。"""
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # 兑底：从 markdown 代码块或首个 { 到末尾 } 提取
+            # 兜底：从 markdown 代码块或首个 { 到末尾 } 提取
             start, end = text.find("{"), text.rfind("}")
             if 0 <= start < end:
                 try:
@@ -207,8 +233,12 @@ class MiMoClient:
             raise LLMError(f"LLM JSON 输出解析失败: {text[:200]}")
 
     def stream(self, messages: list[dict], thinking: bool = True,
-               temperature: float = None, max_tokens: int = 4096) -> Iterator[str]:
-        """流式输出正文 chunk（reasoning 内容不透出给用户）。"""
+               temperature: float = None, max_tokens: int = 4096,
+               with_reasoning: bool = False) -> Iterator[str | tuple[str, str]]:
+        """流式输出。默认只透出正文 chunk（兼容旧调用方）；with_reasoning=True 时
+        yield (etype, text) 元组，etype ∈ {"thinking", "content"}——reasoning 逐块
+        透出供前端实时展示思考过程（思考内容不参与任何落库）。
+        """
         payload = self._payload(messages, thinking, temperature, max_tokens, False, {})
         payload["stream"] = True
         with httpx.Client(timeout=config.LLM_TIMEOUT) as client:
@@ -231,9 +261,13 @@ class MiMoClient:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
+                    if with_reasoning:
+                        reason = delta.get("reasoning_content")
+                        if reason:
+                            yield ("thinking", reason)
                     piece = delta.get("content")
                     if piece:
-                        yield piece
+                        yield ("content", piece) if with_reasoning else piece
 
 
 _client: MiMoClient | None = None

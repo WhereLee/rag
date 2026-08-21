@@ -35,7 +35,10 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest req) {
         String uri = req.getRequestURI();
-        return uri.equals("/health") || uri.startsWith("/error")
+        // /api/qa/**：SSE 流式响应与 ContentCachingResponseWrapper 不兼容
+        // （异步线程在 filter finally 的 copyBodyToResponse 之后才写数据，缓冲被清空导致 0 字节），
+        // 该路径不做响应缓存包装（鉴权仍由 AuthFilter 保证，业务日志在 QaController 内）
+        return uri.startsWith("/api/qa") || uri.equals("/health") || uri.startsWith("/error")
                 || uri.endsWith(".ico") || uri.endsWith(".js") || uri.endsWith(".css");
     }
 

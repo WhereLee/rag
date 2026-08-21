@@ -1,0 +1,30 @@
+{
+  "_说明": "黄金检索测试集：每条问题标注期望命中文件名（Recall@5 判据）。刻意覆盖两类弱点：专有名词类（编号/人名/技术名，BM25 强项）与语义近义类（同义改写，向量强项）。",
+  "questions": [
+    {"id": 1, "query": "LT-S 001-2026 标准中检索块 chunk 长度上限要求是多少", "expect_files": ["文档智能解析技术规范 LT-S 001-2026.pdf"], "category": "专有名词"},
+    {"id": 2, "query": "文档智能解析技术规范中相邻检索块重叠长度要求", "expect_files": ["文档智能解析技术规范 LT-S 001-2026.pdf"], "category": "专有名词"},
+    {"id": 3, "query": "LT-S 001-2026 规范要求向量相似度低于多少的检索结果不得作为答案依据", "expect_files": ["文档智能解析技术规范 LT-S 001-2026.pdf"], "category": "专有名词"},
+    {"id": 4, "query": "文档智能解析技术规范中检索召回率的二级系统要求", "expect_files": ["文档智能解析技术规范 LT-S 001-2026.pdf"], "category": "专有名词"},
+    {"id": 5, "query": "规范规定精排分数低于多少的结果应判为不相关并剔除", "expect_files": ["文档智能解析技术规范 LT-S 001-2026.pdf"], "category": "专有名词"},
+    {"id": 6, "query": "企业智能文档管理白皮书中制造业的部署率是多少", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "专有名词"},
+    {"id": 7, "query": "苏州佛山东莞三座城市应用试点的项目负责人是谁", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "专有名词"},
+    {"id": 8, "query": "白皮书中混合检索加精排方案的平均召回率", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "专有名词"},
+    {"id": 9, "query": "2022 年到 2026 年智能文档系统在企业中的部署率变化趋势", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "语义近义"},
+    {"id": 10, "query": "东莞医疗器械企业把合规问答幻觉率控制在多少", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "专有名词"},
+    {"id": 11, "query": "白皮书调研覆盖了多少家企业、问卷回收有效率多少", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "专有名词"},
+    {"id": 12, "query": "FastAPI is based on which open standards", "expect_files": ["fastapi_readme.md"], "category": "专有名词"},
+    {"id": 13, "query": "FastAPI 的性能与哪些语言相当", "expect_files": ["fastapi_readme.md"], "category": "专有名词"},
+    {"id": 14, "query": "FastAPI can reduce about how many percent of developer induced errors", "expect_files": ["fastapi_readme.md"], "category": "专有名词"},
+    {"id": 15, "query": "MinerU 是什么开源项目、由哪个组织维护", "expect_files": ["mineru_readme.md"], "category": "专有名词"},
+    {"id": 16, "query": "MinerU 的 Python 包名和 GitHub 组织", "expect_files": ["mineru_readme.md"], "category": "专有名词"},
+    {"id": 17, "query": "RAG survey 论文把检索增强生成划分为哪三个范式", "expect_files": ["rag_survey_arxiv.pdf"], "category": "专有名词"},
+    {"id": 18, "query": "Large Language Models 面临哪些核心挑战", "expect_files": ["rag_survey_arxiv.pdf"], "category": "语义近义"},
+    {"id": 19, "query": "Naive RAG 的三个核心步骤是什么", "expect_files": ["rag_survey_arxiv.pdf"], "category": "专有名词"},
+    {"id": 20, "query": "RAG-Survey 综述的资源仓库地址", "expect_files": ["rag_survey_arxiv.pdf"], "category": "专有名词"},
+    {"id": 21, "query": "综述中 RAG 评估覆盖了多少任务和数据集", "expect_files": ["rag_survey_arxiv.pdf"], "category": "专有名词"},
+    {"id": 22, "query": "大模型回答问题时编造内容、怎么通过外部知识缓解", "expect_files": ["rag_survey_arxiv.pdf"], "category": "语义近义"},
+    {"id": 23, "query": "智能文档问答系统的端到端平均时延是多少", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "语义近义"},
+    {"id": 24, "query": "传统关键词检索和向量检索相比哪个召回率更高", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "语义近义"},
+    {"id": 25, "query": "文档解析平均准确率与幻觉率现状", "expect_files": ["企业智能文档管理白皮书（2026年）.pdf"], "category": "语义近义"}
+  ]
+}

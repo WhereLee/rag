@@ -2,7 +2,7 @@
   <el-container class="app-layout">
     <el-aside width="200px" class="sidebar">
       <div class="logo">
-        <el-icon :size="24" color="#409eff"><Monitor /></el-icon>
+        <el-icon :size="22" class="logo-icon"><Document /></el-icon>
         <span>文档问答</span>
       </div>
       <el-menu :default-active="currentRoute" router class="sidebar-menu">
@@ -61,25 +61,35 @@ function handleLogout() {
 <style scoped>
 .app-layout { height: 100vh; }
 .sidebar {
-  background: #fff;
-  border-right: 1px solid #e4e7ed;
+  background: var(--brand-ink);
   display: flex;
   flex-direction: column;
 }
 .logo {
-  padding: 20px 16px;
+  padding: 18px 16px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-size: 16px;
   font-weight: 600;
-  color: #303133;
-  border-bottom: 1px solid #e4e7ed;
+  color: #fff;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
 }
-.sidebar-menu { flex: 1; border-right: none; }
+.logo-icon { color: #4fd1c5; }
+.sidebar-menu { flex: 1; border-right: none; background: transparent; }
+.sidebar-menu :deep(.el-menu-item) { color: var(--brand-ink-text); }
+.sidebar-menu :deep(.el-menu-item:hover) {
+  background: var(--brand-ink-soft);
+  color: var(--brand-ink-text-hi);
+}
+.sidebar-menu :deep(.el-menu-item.is-active) {
+  background: var(--brand-ink-soft);
+  color: #fff;
+  border-right: 2px solid #4fd1c5;
+}
 .sidebar-footer {
   padding: 12px 16px;
-  border-top: 1px solid #e4e7ed;
+  border-top: 1px solid rgba(255,255,255,0.08);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -89,10 +99,11 @@ function handleLogout() {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #606266;
+  color: var(--brand-ink-text);
 }
+.user-info :deep(.el-tag) { border-color: transparent; }
 .main-content {
-  background: #f5f7fa;
+  background: var(--brand-bg);
   padding: 20px;
   overflow-y: auto;
 }

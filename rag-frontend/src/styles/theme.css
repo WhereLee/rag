@@ -1,0 +1,25 @@
+/* 全局主题：覆盖 Element Plus 默认蓝，建立有记忆点的视觉语言。
+   主色深青 #0f766e（文档/知识管理类产品气质，克制不花哨），
+   light-3/5/7/8/9 与 dark-2 按 70%/50%/30%/20%/10% 白和 20% 黑混合计算。 */
+:root {
+  --el-color-primary: #0f766e;
+  --el-color-primary-light-3: #579f9a;
+  --el-color-primary-light-5: #87bbb6;
+  --el-color-primary-light-7: #b7d6d3;
+  --el-color-primary-light-8: #cfe4e2;
+  --el-color-primary-light-9: #e7f1f0;
+  --el-color-primary-dark-2: #0c5e58;
+  --brand-ink: #1c2333;        /* 侧边栏深色 */
+  --brand-ink-soft: #2a3247;   /* 侧边栏 hover/激活底 */
+  --brand-ink-text: #aab4c8;   /* 侧边栏次级文字 */
+  --brand-ink-text-hi: #eef1f6;/* 侧边栏主文字 */
+  --brand-bg: #f4f6f8;         /* 内容区背景（比默认 #f5f7fa 冷一档） */
+}
+
+/* 滚动条：细、圆角，弱化存在感 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #c9d2dc; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #aab6c4; }
+::-webkit-scrollbar-track { background: transparent; }
+
+body { margin: 0; }

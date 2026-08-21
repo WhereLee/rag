@@ -1,12 +1,23 @@
 <template>
-  <div class="login-container">
-    <div class="login-card">
-      <div class="login-header">
-        <el-icon :size="40" color="#409eff"><Monitor /></el-icon>
-        <h1>智能文档问答系统</h1>
-        <p>上传文档，智能检索，精准回答</p>
+  <div class="login-wrap">
+    <div class="login-brand">
+      <div class="brand-top">
+        <el-icon :size="26" class="brand-mark"><Document /></el-icon>
+        <span class="brand-name">文档问答</span>
       </div>
+      <div class="brand-mid">
+        <h1>给文档一个能回答问题的入口</h1>
+        <p>上传资料，系统解析入库后即可提问；回答逐句标注来源文件与页码，可回溯核对。</p>
+        <ul class="brand-points">
+          <li>支持 PDF / Word / Excel / PPT / Markdown，自动解析入库</li>
+          <li>向量 + 关键词混合检索，粗筛后交叉编码精排</li>
+          <li>资料中没有答案时明确拒答，不编造</li>
+        </ul>
+      </div>
+      <div class="brand-foot">蓝图数字研究院 · 内部知识库</div>
+    </div>
 
+    <div class="login-panel">
       <el-tabs v-model="activeTab" stretch>
         <el-tab-pane label="登录" name="login">
           <el-form :model="loginForm" :rules="loginRules" ref="loginFormRef" @submit.prevent="handleLogin">
@@ -83,11 +94,11 @@ const validateConfirm = (rule, value, callback) => {
 const registerRules = {
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
-    { min: 2, message: '用户名至少2位', trigger: 'blur' }
+    { pattern: /^[a-zA-Z0-9_]{2,32}$/, message: '仅允许字母、数字、下划线，2-32位', trigger: 'blur' }
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
-    { min: 6, message: '密码至少6位', trigger: 'blur' }
+    { pattern: /^[A-Za-z0-9@#$%^&*._-]{8,32}$/, message: '密码需为8-32位字母、数字或常见符号（@#$%^&*._-）', trigger: 'blur' }
   ],
   confirmPassword: [
     { required: true, message: '请确认密码', trigger: 'blur' },
@@ -100,9 +111,9 @@ async function handleLogin() {
   loading.value = true
   try {
     const { data } = await authApi.login(loginForm.username, loginForm.password)
-    auth.setAuth(data.token, { username: data.username, role: data.role })
+    auth.setAuth(data.token, data.user_id, { username: data.username, role: data.role })
     ElMessage.success(`欢迎回来，${data.username}`)
-    router.push('/chat')
+    router.push('/documents')
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '登录失败')
   } finally {
@@ -127,31 +138,74 @@ async function handleRegister() {
 </script>
 
 <style scoped>
-.login-container {
+.login-wrap {
   min-height: 100vh;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: var(--brand-ink);
 }
-.login-card {
-  width: 420px;
-  padding: 40px;
-  background: white;
-  border-radius: 16px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+.login-brand {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 48px 64px;
+  color: #fff;
 }
-.login-header {
-  text-align: center;
-  margin-bottom: 30px;
+.brand-top { display: flex; align-items: center; gap: 10px; }
+.brand-mark { color: #4fd1c5; }
+.brand-name { font-size: 18px; font-weight: 600; letter-spacing: 1px; }
+.brand-mid h1 {
+  font-size: 30px;
+  line-height: 1.35;
+  margin: 0 0 14px;
+  font-weight: 600;
+  max-width: 460px;
 }
-.login-header h1 {
-  margin: 12px 0 4px;
-  font-size: 22px;
-  color: #303133;
-}
-.login-header p {
-  color: #909399;
+.brand-mid p {
+  color: var(--brand-ink-text);
   font-size: 14px;
+  line-height: 1.8;
+  max-width: 440px;
+  margin: 0 0 28px;
+}
+.brand-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.brand-points li {
+  position: relative;
+  padding-left: 20px;
+  color: var(--brand-ink-text);
+  font-size: 13px;
+}
+.brand-points li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4fd1c5;
+}
+.brand-foot {
+  color: #56617c;
+  font-size: 12px;
+}
+.login-panel {
+  width: 400px;
+  background: #fff;
+  padding: 48px 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+@media (max-width: 900px) {
+  .login-brand { display: none; }
+  .login-panel { width: 100%; }
 }
 </style>

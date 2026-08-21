@@ -1,150 +1,115 @@
 # 智能文档问答系统（RAG）
 
-一个端到端的生产级 RAG 系统：**多格式文档解析（含扫描件/表格/图片）→ 混合检索 → LangGraph Agentic 问答 → 评估/反馈/审批闭环 → 可观测**。
+企业级 RAG 系统：**上传（分片/秒传/配额）→ 异步解析管线（PDF/VLM/表格/图片）→ 混合检索（向量+BM25+RRF+rerank）→ 多轮问答（L1/L2 存档 + 长期记忆 + 思考流式）→ 反馈闭环（点赞/点踩 → bad case 归因 → 回归集升级）**。
 
-- **Python 服务**（FastAPI, 端口 8090）：解析、检索、Agent、评估、Prompt 管理、诊断、MCP
-- **Java 薄网关**（Spring Boot 3, 端口 8082）：JWT 鉴权、滑动窗口限流、审计、SSE 透传
-- **基础设施**：PostgreSQL 18 + pgvector（向量 + checkpoint + 全部业务表）、Redis（语义缓存）、Zipkin（OTEL trace 导出）
-- **模型**：LLM/VLM 走 MiMo API（mimo-v2.5，唯一多模态档位）；Embedding 与 Reranker 纯本地 CPU ONNX int8 推理
+- **Python 服务**：FastAPI 双服务——主服务 :8090（上传/解析/Agent/评估/反馈/管理）+ 问答服务 :8091（多轮问答/L1/L2 存档/思考流式）
+- **Java 网关**：Spring Boot 3.5 :8082——JWT 鉴权 / IP 限流（可信代理 XFF 解析）/ 审计 / SSE 透传 / 管理 API 代理
+- **前端**：Vue 3 + Element Plus（Vite dev :3000 / 生产构建 + nginx）
+- **基础设施**：PostgreSQL + pgvector（块/双向量/存档/记忆/会话）、Redis（预留）、Zipkin（OTEL trace，可选）
+- **模型**：LLM/VLM 走 MiMo API（mimo-v2.5，含 reasoning）；Embedding（bge-base-zh）与 Reranker（bge-reranker-v2-m3）本地 CPU ONNX int8
 
-## 架构总览
+## 架构
 
 ```
-                          ┌──────────────────────┐
- 客户端 ──JWT──▶          │  Java 薄网关 :8082    │  鉴权/限流/审计/SSE透传
-                          └──────────┬───────────┘
-                                     ▼
-┌────────────────────────────────────────────────────────────────────┐
-│                    Python 服务 :8090 (FastAPI)                      │
-│                                                                    │
-│  /api/ingest    解析路由四通道 ──▶ 切块 ──▶ 向量化 ──▶ pgvector     │
-│     A 文本直提(PDF文本密度≥50字)                                    │
-│     B 直提 + VLM 表格结构化(矢量线条检测)                            │
-│     C VLM 整页转录(扫描件)        IMG VLM 语义描述(图片)             │
-│                                                                    │
-│  /api/rag       混合检索：向量(HNSW) + BM25(jieba) ──RRF(k=60)──▶   │
-│                 bge-reranker-v2-m3 精排 ──▶ 阈值分级(reject/low)    │
-│                                                                    │
-│  /api/agent     LangGraph 主图：route(4档)/decompose/grade(CRAG     │
-│                 ≤2轮重检索)/generate(思考档位)/reflect(仅complex)    │
-│                                                                    │
-│  /api/eval      黄金集40题：Context Recall / MRR / Refuse Acc /     │
-│                 LLM-as-judge                                       │
-│  /api/feedback  坏例归因(检索/Prompt/模型三分) ──▶ 回归集            │
-│  /api/admin     Prompt 版本管理 + HITL 审批图(回归对比→interrupt)    │
-│  /api/diagnosis 诊断 Agent：trace/慢调用/坏例聚合分析                │
-│  MCP server     对外暴露检索/问答工具（stdio）                       │
-└──────────┬──────────────────────┬──────────────────┬───────────────┘
-           ▼                      ▼                  ▼
-   PostgreSQL 18+pgvector      Redis 语义缓存      Zipkin :9411
-   (chunks/双向量列/checkpoint)                    (OTEL trace)
+浏览器 ──> nginx(:80/443) ──> 前端静态（dist/）
+                       └──> Java 网关 :8082（鉴权/限流/审计/SSE 透传/代理白名单）
+                               ├──> Python 主服务 :8090（上传/解析/Agent/评估/反馈/管理）
+                               └──> Python 问答服务 :8091（多轮问答/L1L2存档/思考流式）
+                                       └──> PostgreSQL :5432（pgvector）
 ```
+
+**多租户**：user_id 一律从 JWT 解析（网关注入 X-User-Id + X-Gateway-Sign 签名，Python 校验后才信任）；文件/目录/会话/缓存/记忆全部按 user_id 隔离；检索 SQL 层过滤，B 用户物理查不到 A 的块。
+
+**问答链路**（`/api/qa/ask`，SSE 事件流：meta → thinking → delta → done）：
+1. **L1 精确存档**：查询归一化（全角转半角/空白压缩/尾部标点去除）→ MD5 查 `qa_cache`，命中直返（零检索零 LLM），支持**跨用户复用**（秒传同 blob 内容边界校验，防泄露）
+2. **检索**：向量 top50 + BM25 top50 → RRF 融合 → rerank 精排（BM25 强命中保护：低分但词项命中的块降级保留，两路信号都弱才拒答）
+3. **L2 语义参考**：query embedding 余弦 sim≥0.9 的历史存档作为 few-shot 注入；长期记忆（focus/未解疑问）recall 注入
+4. **生成**：思考流式透出（前端可关）、正文按 delta 流式；拒答不存档（含 LLM 输出"资料中未找到"的兜底检测）；停止生成时部分回答落 qa_log 但**不写缓存**
+5. **反馈闭环**：回答可点赞/点踩（点踩附原因）→ bad_case 快照 → LLM 归因异步化（retrieval/generation）→ 人工确认升级回归集
 
 ## 目录结构
 
 ```
 rag/
-├── rag-python/
-│   ├── src/
-│   │   ├── ingest/        解析路由四通道（vlm/page_analyzer/pdf_parser/
-│   │   │                  doc_parser/chunker/sync_service）
-│   │   ├── retrieval/     hybrid(RRF+rerank+阈值)、bm25_index、
-│   │   │                  semantic_cache
-│   │   ├── agent/         main_graph(LangGraph)、qa_service、
-│   │   │                  approval_graph(HITL)、diagnosis
-│   │   ├── llm/           mimo_client（预算递增防 reasoning 挤占）、
-│   │   │                  prompt_loader（DB 优先 + 安全填充）
-│   │   ├── eval/          evaluator（关键词锚定命中判定 + judge）
-│   │   ├── memory/        会话记忆（滑动摘要 + 事实抽取）
-│   │   ├── feedback/      坏例归因 attributor
-│   │   ├── mcp_server/    MCP stdio server
-│   │   ├── observability/ OTEL tracing（Zipkin exporter）+ 结构化日志
-│   │   ├── db/            psycopg 连接池
-│   │   └── api/           FastAPI 路由（ingest/rag/agent/eval/feedback/
-│   │                      admin(prompts+approvals)/diagnosis）
-│   ├── eval/questions.json   黄金评估集 40 题（factual/table/cross_page/refuse）
-│   └── models/            bge-base-zh / ritrieve-zh / bge-reranker-v2-m3
-│                          （均为 ONNX int8，CPU 推理）
-├── rag-java/              Spring Boot 3.5 薄网关（JWT/限流/审计/SSE）
-├── scripts/               init_db / gen_corpus / run_experiments / smoke
-├── data/corpus/           语料（真实 README + 自造白皮书/规范/扫描件/图片）
-├── data/parsed/vlm_cache/ VLM 结果按图片 hash 落盘缓存（重入库零成本）
-└── docs/                  architecture.md / development-plan.md / experiments/
+├── rag-python/src/
+│   ├── ingest/        解析管线（parser 新管线: pdf/docx/xlsx/pptx/txt_md/image/vlm + clean 清洗 + chunker 切块 + worker 异步任务 + indexer 落库）
+│   ├── retrieval/     混合检索（向量+BM25+RRF+rerank+强命中保护+embedder）
+│   ├── qa/            问答服务（L1/L2 存档、跨用户复用、多轮会话、思考流式、中断兜底）
+│   ├── agent/         LangGraph Agentic RAG（route/decompose/grade/generate/reflect + prompt_guard + approval_graph + circuit_breaker）
+│   ├── llm/           mimo_client（流式/思考/JSON 模式）
+│   ├── memory/        长期记忆（focus 提取 + recall + 会话历史）
+│   ├── feedback/      反馈归因 attributor（异步归因 + bad case 升级回归集）
+│   ├── eval/          评估（黄金集 40 题：factual/table/cross_page/refuse）
+│   ├── api/           主服务路由（ingest/rag/agent/eval/feedback/prompt/diagnosis）
+│   ├── mcp_server/    MCP stdio server（暴露检索/问答工具）
+│   ├── observability/ OTEL tracing + 结构化日志
+│   └── db/            psycopg 连接池
+├── rag-java/          Spring Boot 3.5 网关（JWT/限流/审计/SSE 透传/代理白名单/可信代理 XFF）
+├── rag-frontend/      Vue 3（登录/文档管理/目录/会话/问答/Admin：Prompt 管理+审批+评估）
+├── scripts/           初始化/语料生成/实验/验收（init_db.py、start-gateway.ps1、debug/verify_rag_*.py）
+├── docs/              architecture / development-plan / DEPLOYMENT（部署手册）/ 坑位记录 / 面试素材积累
+└── data/              corpus（语料）/ parsed（解析缓存）/ jobs（worker 任务文件）
 ```
 
-## 快速启动
+## 快速启动（本地开发）
 
-前置：PostgreSQL（含 pgvector、pg_trgm 扩展）、Redis、Zipkin（可选）、Python 3.13、JDK 17+。
+前置：PostgreSQL（pgvector）、Python 3.13、JDK 17+、Node 18+；`rag/.env` 配置 MIMO_API_KEY / PG_DSN / INTERNAL_API_KEY 等（参考 `docs/DEPLOYMENT.md` 环境变量表）。
 
 ```powershell
-# 0. 环境配置：rag/.env 中填入 MIMO_API_KEY / PG_DSN / REDIS_URL
-# 1. 建库建表（rag_kb 库 + 全部表 + 双向量列）
+# 1. 初始化数据库（建 rag_kb + 基础表 + 分块/存档表）
 python scripts\init_db.py
-# 2. 生成自造语料（白皮书/技术规范/扫描通知/图片）
-python scripts\gen_corpus.py
-# 3. 启动 Python 服务（必须从 src 目录启动）
+PGCLIENTENCODING=UTF8 psql -h localhost -U postgres -d rag_kb -f scripts\init_chunk.sql
+
+# 2. 启动 Python 双服务（各开一个终端，必须在 src 目录下）
 cd rag-python\src
-python -m uvicorn api.app:app --port 8090
-# 4. 入库语料（解析+向量化）
-curl -X POST http://localhost:8090/api/ingest/ingest-path -H "Content-Type: application/json" -d "{\"path\": \".../data/corpus\"}"
-# 5. 灌评估集并跑基线
-curl -X POST http://localhost:8090/api/eval/seed
-curl -X POST http://localhost:8090/api/eval/run
-# 6. 启动 Java 网关
-cd rag-java
-mvn clean package -DskipTests
-java -jar target\rag-gateway-0.1.0.jar
+python -m uvicorn api.app:app --port 8090     # 主服务（上传/解析/评估/反馈）
+python -m uvicorn qa.app:app --port 8091      # 问答服务（多轮/存档/思考流式）
+
+# 3. 启动 Java 网关（必须走脚本注入 .env 安全配置，直接 mvn 会 fail-fast）
+powershell -File scripts\start-gateway.ps1
+
+# 4. 启动前端（开发模式，代理到网关）
+cd rag-frontend; npm install; npm run dev    # http://localhost:3000
 ```
 
-网关使用示例：
+生产部署（nginx 反代 + systemd + 内存预算）见 **`docs/DEPLOYMENT.md`**。
 
-```powershell
-# 注册/登录
-curl -X POST http://localhost:8082/api/auth/register -H "Content-Type: application/json" -d "{\"username\":\"u1\",\"password\":\"p1\"}"
-$tok = (curl -s -X POST http://localhost:8082/api/auth/login -H "Content-Type: application/json" -d "{\"username\":\"u1\",\"password\":\"p1\"}" | ConvertFrom-Json).token
-# 问答（走鉴权/限流/审计 → 透传 Python）
-curl -X POST http://localhost:8082/api/chat/ask -H "Authorization: Bearer $tok" -H "Content-Type: application/json" -d "{\"query\":\"白皮书里调研了多少家企业？\"}"
-```
+## 主要 API（经网关 8082，JWT 鉴权）
 
-## API 一览（Python 8090）
-
-| 路径 | 说明 |
+| 路由 | 说明 |
 |---|---|
-| `POST /api/ingest/upload` · `ingest-path` · `GET status/documents` | 文档入库管线 |
-| `POST /api/rag/ask` · `GET /api/rag/history/{sid}` | 问答（stream=true 为 SSE） |
-| `POST /api/agent/run` · `/api/agent/experiment` | Agent 图直调 / 实验开关 |
-| `POST /api/eval/seed` · `/run` · `GET /runs` · `/compare` | 评估 |
-| `GET /api/feedback/bad-cases` · `POST .../attribute` · `/confirm` | 反馈闭环 |
-| `GET /api/admin/prompts` · `POST /api/admin/prompts/{code}/change` | Prompt 版本管理 |
-| `GET /api/admin/approvals` · `POST /api/admin/approvals/{id}/resume` | HITL 审批 |
-| `POST /api/diagnosis/trigger` · `GET latest/history` | 诊断报告 |
+| `/api/auth/register` `/login` | 注册（IP 限流 3 次/分）/ 登录（限流 + 连续失败锁定） |
+| `/api/files/**` `/api/dirs/**` | 文件（分片上传/秒传/列表分页/回收站）/ 单层目录 |
+| `/api/qa/ask` | 问答 SSE 流式（thinking/delta/done，done 带 qa_log_id） |
+| `/api/qa/sessions/**` | 会话（目录绑定/多轮历史/摘要） |
+| `/api/chat/ask-stream` | 旧链路对话（Agent 版，历史兼容） |
+| `/api/feedback`（经 admin 代理） | 反馈提交（点赞/点踩+原因）/ bad case 列表/归因/确认 |
+| `/api/admin/**` | Prompt 版本管理 + HITL 审批 + 评估运行 |
 
-MCP server：`python -m mcp_server.server`（stdio，暴露 search / ask 工具）。
+Python 直连（8090/8091）需 X-User-Id + X-Internal-Key/X-Gateway-Sign 校验，仅供内部脚本/运维。
 
-## 实验体系
+## 测试与验收
 
-全部实验由 `scripts/run_experiments.py` 进程内直调（不经 HTTP，避免 uvicorn 干扰），结果落 `eval_run` 并输出 JSON。40 题黄金集：factual 17 / table 8 / cross_page 7 / refuse 8。命中判定用证据关键词全包含（规避 chunk_id 随重入库漂移）。
+- **单元/集成**：`python -m pytest rag-python/tests`（135 项）+ `mvn test`（Java 网关 17 项）
+- **功能验收脚本**（`scripts/debug/verify_rag_*.py`）：P1 目录 / P3 存档（normal+edge）/ P4 L2+记忆 / P5 跨用户复用 / 反馈闭环 / 停止生成 / 输入限制 / XFF 限流，每个脚本含正常 + 边界用例
+- **浏览器 E2E**：Browser 子代理全链路（上传→解析轮询→问答→思考区→反馈→停止）
+- **评估体系**：黄金集 40 题（`scripts/run_experiments.py`，E1/E3/E4/E5 实验记录于 `docs/experiments/`）
 
-| 实验 | 变量 | 结论 |
-|---|---|---|
-| E1 | embedding2 列（ritrieve-zh 1792 维）vs bge-base 768 维 | 见 `docs/experiments/` |
-| E3 | 关闭思考（force_thinking=False）vs 默认 | 待补 |
-| E4 | 关闭反思（disable_reflect）vs 默认 | 待补 |
-| E5 | 检索排除 table/image 块（量化 VLM 结构化块价值） | 待补 |
+## 关键设计决策
 
-> 注：E2（reranker v2-gte 对照）因模型下载/ONNX 导出链路在受限网络下不可行，如实留档为未执行项。
-
-## 关键设计决策与踩坑
-
-1. **MiMo reasoning 挤占正文**：`enable_thinking` 开启时 reasoning tokens 计入 `max_tokens` 预算，预算不足返回 `finish=length` 且 content 为空。修复：预算逐级加倍（cap 8192）重试，不计入失败重试；`chat_json` 不传 `response_format`，靠提示词约束 + 宽容解析。
-2. **双向量列 AB 对照**：`embedding`（bge-base）与 `embedding2`（ritrieve 1792 维）并存，查询编码器按 `VECTOR_COLUMN` 经 `COLUMN_EMBEDDER` 映射自动配对，避免维度不匹配。
-3. **PostgresSaver 必须 autocommit 连接**：`from_conn_string` 是上下文管理器不能直接用，改 `psycopg.connect(autocommit=True)` 常驻连接 + `saver.setup()`。
-4. **HITL 审批量化依据**：submit 变更时自动对回归集跑新旧 Prompt 双评估，`interrupt` 携带对比指标，审批人凭数据决策；resume 用 `Command(resume=...)`。
-5. **VLM 结果 hash 缓存**：解析结果按页图 hash 落盘 JSON，重复入库零 API 成本；扫描件/表格题的答案可追溯到 VLM 转录/结构化块。
-6. **评估不依赖 chunk_id**：证据关键词锚定内容本身，重入库后评估仍可复现。
+1. **两级问答存档（L1 精确 + L2 语义）**：同问题直返零成本；近似问题注入历史回答参考；文件变更（重解析/软删）事件驱动失效 + 幂等重建；跨用户复用带"同 blob 内容边界"安全校验（坑位/面试素材见 docs）
+2. **拒答双保险**：rerank 阈值 + BM25 强命中保护（召回取并集、拒答取交集）；拒答不存档（含 LLM 拒答文案兜底检测）
+3. **思考流式 + 开关**：reasoning 逐块透出（不落库）；`max_tokens=8192` 同时覆盖思考+正文（预算不足正文被挤空）；开关默认开（忠实度 E3 消融：table 1.0→0.825）
+4. **停止生成**：AbortController → 网关断开传播 → Python GeneratorExit → finally 兜底（部分回答落 qa_log、不写缓存）
+5. **反馈闭环**：点赞/点踩 → bad_case 快照 → LLM 归因异步化（20-60s 不阻塞提交）→ 人工确认升级回归集（HITL）
+6. **限流信任边界**：默认不信任 X-Forwarded-For（防伪造绕过）；配置可信代理后按标准代理链语义解析（从右往左取第一个非代理 IP）
+7. **安全默认值 fail-fast**：Java/Python 双端敏感配置无代码内默认值，缺失拒绝启动（防部署静默使用默认密码）
 
 ## 已知约束
 
-- 纯 CPU 环境：reranker 信号量限 1 并发，超时降级跳过精排。
-- MiMo 为远程 API：网络抖动时预算递增重试兜底；judge 指标按需开启控制成本。
-- 网关限流为进程内滑动窗口（单机演示够用，多实例应换 Redis 令牌桶）。
+- 本地 CPU 推理：reranker 单次约 1 秒级，高并发下检索延迟上升
+- MiMo 为远程 API：网络波动时思考阶段可能挂起（1-4 分钟属深度推理正常范围）；judge 指标按需开关控制成本
+- 限流为进程内实现（单机形态）；多实例扩展时迁移 Redis 共享计数（演进路径见 `docs/坑位记录.md` #1）
+- 中文问题查英文文档召回偏弱（已知演进项，见坑位 #25）
+
+详细设计见 `docs/architecture.md`，部署见 `docs/DEPLOYMENT.md`，历史决策与坑位见 `docs/坑位记录.md`。

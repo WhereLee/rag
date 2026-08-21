@@ -176,3 +176,66 @@ CREATE TABLE IF NOT EXISTS diagnosis_report (
 );
 
 -- LangGraph Checkpointer 表由 langgraph-checkpoint-postgres 自动创建
+
+-- 入库异步任务系统（第一轮修复：提交与执行解耦）
+-- job_key 幂等键唯一约束防并发双插；lease_until 为 worker 租约（staleness 巡检回收）
+CREATE TABLE IF NOT EXISTS ingest_job (
+    id BIGSERIAL PRIMARY KEY,
+    job_key VARCHAR(100) UNIQUE NOT NULL,          -- sha256(user_id:file_hash:replace)
+    user_id BIGINT NOT NULL REFERENCES kb_user(id),
+    document_id BIGINT NOT NULL REFERENCES kb_document(id),
+    file_hash CHAR(64) NOT NULL,
+    filename VARCHAR(500) NOT NULL,
+    doc_type VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'queued',  -- queued/running/done/failed/dead
+    stage VARCHAR(30) NOT NULL DEFAULT 'pending',  -- pending/parsing/chunking/embedding/indexing
+    progress FLOAT DEFAULT 0,                      -- 0~1
+    step_detail JSONB,                             -- 阶段级/页级明细
+    attempt INT DEFAULT 0,
+    max_attempts INT DEFAULT 3,
+    lease_until TIMESTAMP,                         -- running:租约截止；queued:退避到期时间；NULL=可立即执行
+    error TEXT,
+    file_path VARCHAR(500),                        -- 上传文件持久落盘位置（worker 读取）
+    trace_id VARCHAR(50),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_job_status ON ingest_job(status, lease_until);
+CREATE INDEX IF NOT EXISTS idx_ingest_job_user ON ingest_job(user_id, created_at);
+
+
+-- 第三轮：失败块闭环（用户自决恢复）
+CREATE TABLE IF NOT EXISTS issue_items (
+    id BIGSERIAL PRIMARY KEY,
+    job_id BIGINT NOT NULL REFERENCES ingest_job(id) ON DELETE CASCADE,
+    document_id BIGINT NOT NULL REFERENCES kb_document(id) ON DELETE CASCADE,
+    page_no INT NOT NULL,
+    block_order INT DEFAULT 0,
+    block_type VARCHAR(10) NOT NULL,
+    reason TEXT NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    resolution TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_issue_job ON issue_items(job_id, status);
+CREATE INDEX IF NOT EXISTS idx_issue_doc ON issue_items(document_id, status);
+
+-- 第三轮：失败块闭环
+ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS bbox JSONB;
+ALTER TABLE ingest_job ADD COLUMN IF NOT EXISTS job_type VARCHAR(20) DEFAULT 'full';
+
+ALTER TABLE ingest_job ADD COLUMN IF NOT EXISTS issue_id BIGINT;
+
+-- 用户文件（私人文件管理：上传/列表/删除/下载）
+CREATE TABLE IF NOT EXISTS user_file (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES kb_user(id),
+    filename VARCHAR(255) NOT NULL,           -- 原始文件名（展示用）
+    stored_name VARCHAR(100) NOT NULL,        -- uuid.ext（磁盘存储名）
+    file_size BIGINT NOT NULL DEFAULT 0,
+    content_type VARCHAR(100) DEFAULT '',
+    status SMALLINT DEFAULT 1,                -- 1正常 0已删除
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_file_user ON user_file(user_id, status);

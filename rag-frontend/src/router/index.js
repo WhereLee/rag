@@ -10,12 +10,12 @@ const routes = [
   },
   {
     path: '/',
-    redirect: '/chat'
+    redirect: '/documents'
   },
   {
     path: '/chat',
     name: 'Chat',
-    component: () => import('../views/Chat.vue'),
+    component: () => import('../views/AskView.vue'),
     meta: { requiresAuth: true }
   },
   {
