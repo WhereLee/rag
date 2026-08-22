@@ -52,9 +52,10 @@ RERANK_MODEL_DIR = os.getenv("RERANK_MODEL_DIR", "bge-reranker-base-onnx-int8")
 EMBED_BATCH_SIZE = _int("EMBED_BATCH_SIZE", 32)
 ONNX_THREADS = _int("ONNX_THREADS", 8)          # P 核绑定（i5-12500H）
 # 推理线程数拆分：embedding（短任务毫秒级）与 rerank（秒级 CPU 密集）分开配置，
-# 默认跟随 ONNX_THREADS（行为不变）；4 核服务器经 .env 覆盖（EMBED_THREADS=4 RERANK_THREADS=4）
-# 注：RERANK_THREADS=4 × 信号量 2 = 8 线程超订 4 核（压测数据均基于此配置）；
-# 理论最优 2×2，未实测验证，改前须重跑检索层压测对比
+# 默认跟随 ONNX_THREADS（行为不变）；4 核服务器经 .env 覆盖（EMBED_THREADS=4 RERANK_THREADS=2）
+# 2026-08-23 实测（服务器 4 核，级联 on）：RERANK_THREADS=2 优于 4——4 并发时
+# p50 19885→9545ms（-52%）、降级率 37.5%→15.4%、QPS +72%；8 并发时两者差异在噪声内
+# （级联跳过率随机性影响，A/B 差距 ~8%）。结论：2 线程×信号量 2 = 4 核恰饱和，避免超订
 EMBED_THREADS = _int("EMBED_THREADS", ONNX_THREADS)
 RERANK_THREADS = _int("RERANK_THREADS", ONNX_THREADS)
 # rerank 并发推理实例数（信号量）：4 核 = 2 线程 × 2 实例恰饱和；
