@@ -116,13 +116,12 @@ def mark_skipped(issue_id: int) -> None:
 
 
 def resolve_for_file(file_id: int, resolution: str = "auto:parsed") -> int:
-    """文件重新解析成功后，自动解决该文件全部待处理 issue（v2 闭环收尾）。"""
-    row = pg_store.query_one(
+    """文件重新解析成功后，自动解决该文件全部待处理 issue（v2 闭环收尾）。
+    注：RETURNING 不支持聚合（count）——pg_store.execute 直接返回 rowcount。"""
+    n = pg_store.execute(
         """UPDATE issue_items SET status=%s, resolution=%s, updated_at=NOW()
-           WHERE file_id=%s AND status IN (%s,%s)
-           RETURNING count(*) AS n""",
+           WHERE file_id=%s AND status IN (%s,%s)""",
         (RESOLVED, resolution, file_id, PENDING, RETRYING))
-    n = (row or {}).get("n", 0)
     if n:
         logger.info("issues auto-resolved: file=%s n=%d", file_id, n)
     return n
@@ -130,19 +129,15 @@ def resolve_for_file(file_id: int, resolution: str = "auto:parsed") -> int:
 
 def reset_retrying(file_id: int) -> int:
     """解析完成仍有占位：retrying 的 issue 重置回 pending（允许用户再次操作）。"""
-    row = pg_store.query_one(
+    return pg_store.execute(
         """UPDATE issue_items SET status=%s, updated_at=NOW()
-           WHERE file_id=%s AND status=%s
-           RETURNING count(*) AS n""",
+           WHERE file_id=%s AND status=%s""",
         (PENDING, file_id, RETRYING))
-    return (row or {}).get("n", 0)
 
 
 def cancel_for_file(file_id: int) -> int:
     """文件软删时批量取消 pending issue。"""
-    row = pg_store.query_one(
+    return pg_store.execute(
         """UPDATE issue_items SET status=%s, updated_at=NOW()
-           WHERE file_id=%s AND status IN (%s,%s)
-           RETURNING count(*) AS n""",
+           WHERE file_id=%s AND status IN (%s,%s)""",
         (CANCELLED, file_id, PENDING, FAILED))
-    return (row or {}).get("n", 0)
