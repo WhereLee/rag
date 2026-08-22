@@ -24,11 +24,19 @@ from retrieval.retriever import retrieve  # noqa: E402
 QUERIES_FILE = Path(__file__).resolve().parents[1] / "rag-python" / "eval" / "questions.json"
 
 
-def load_queries() -> list[str]:
+def load_queries(queries_file: str | None) -> list[str]:
+    """查询集：默认黄金集 + 截断变体；--queries 指定 JSON 数组文件或每行一条的 txt。"""
+    if queries_file:
+        p = Path(queries_file)
+        if p.suffix == ".json":
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            return [item.get("question", item) if isinstance(item, dict) else item
+                    for item in data]
+        return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
     with open(QUERIES_FILE, encoding="utf-8") as f:
         data = json.load(f)
     qs = [item["question"] for item in data]
-    # 扩展变体：真实查询不会全是问题句式，加入短问/关键词式
     qs += [q[:8] for q in qs[:8]]
     return qs
 
@@ -38,9 +46,11 @@ def main():
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--duration", type=int, default=30)
     ap.add_argument("--cascade", choices=["on", "off"], default="off")
+    ap.add_argument("--queries", type=str, default=None,
+                    help="自定义查询集（JSON 数组或每行一条 txt）；默认黄金集+变体")
     args = ap.parse_args()
 
-    queries = load_queries()
+    queries = load_queries(args.queries)
     stop = threading.Event()
     lat: list[float] = []
     lock = threading.Lock()

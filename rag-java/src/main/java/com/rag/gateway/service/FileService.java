@@ -260,9 +260,13 @@ public class FileService {
             items = jdbc.queryForList(
                     "SELECT uf.id, uf.filename, uf.file_size, uf.content_type, uf.created_at, " +
                     "       pt.status AS parse_status, pt.error AS parse_error, pt.node_count AS parse_node_count, " +
-                    "       pt.stage AS parse_stage, pt.progress AS parse_progress " +
+                    "       pt.stage AS parse_stage, pt.progress AS parse_progress, " +
+                    "       COALESCE(iss.n, 0) AS issue_count " +
                     "FROM user_file uf " +
                     "LEFT JOIN parse_tasks pt ON pt.file_id = uf.id " +
+                    "LEFT JOIN (SELECT file_id, count(*) AS n FROM issue_items " +
+                    "          WHERE status IN ('pending','retrying','failed') GROUP BY file_id) iss " +
+                    "       ON iss.file_id = uf.id " +
                     "WHERE uf.user_id=? AND uf.status=1 ORDER BY uf.id DESC LIMIT ? OFFSET ?",
                     userId, pageSize, offset);
             total = jdbc.queryForObject(
@@ -275,9 +279,13 @@ public class FileService {
             items = jdbc.queryForList(
                     "SELECT uf.id, uf.filename, uf.file_size, uf.content_type, uf.created_at, " +
                     "       pt.status AS parse_status, pt.error AS parse_error, pt.node_count AS parse_node_count, " +
-                    "       pt.stage AS parse_stage, pt.progress AS parse_progress " +
+                    "       pt.stage AS parse_stage, pt.progress AS parse_progress, " +
+                    "       COALESCE(iss.n, 0) AS issue_count " +
                     "FROM user_file uf " +
                     "LEFT JOIN parse_tasks pt ON pt.file_id = uf.id " +
+                    "LEFT JOIN (SELECT file_id, count(*) AS n FROM issue_items " +
+                    "          WHERE status IN ('pending','retrying','failed') GROUP BY file_id) iss " +
+                    "       ON iss.file_id = uf.id " +
                     "WHERE uf.user_id=? AND uf.status=1 AND uf.dir_id=? ORDER BY uf.id DESC LIMIT ? OFFSET ?",
                     userId, dirId, pageSize, offset);
             total = jdbc.queryForObject(

@@ -226,6 +226,23 @@ export const fileApi = {
   reparse(id) {
     return http.post(`/api/files/${id}/reparse`)
   },
+  // 失败块（v2 闭环）：经网关 admin 代理白名单转发到 Python ingest_api（普通用户可用）
+  listIssues(fileId) {
+    return http.get(`/api/admin/proxy/api/ingest/files/${fileId}/issues`)
+  },
+  retryIssue(issueId) {
+    return http.post(`/api/admin/proxy/api/ingest/issues/${issueId}/retry`, {})
+  },
+  describeIssue(issueId, text) {
+    return http.post(`/api/admin/proxy/api/ingest/issues/${issueId}/describe`, { text })
+  },
+  replaceIssue(issueId, file) {
+    const fd = new FormData()
+    fd.append('file', file)
+    return http.post(`/api/admin/proxy/api/ingest/issues/${issueId}/replace`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
   trash() {
     return http.get('/api/files/trash')
   },

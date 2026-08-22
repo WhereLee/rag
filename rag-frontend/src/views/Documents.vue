@@ -103,6 +103,15 @@
                   <el-button v-if="canReparse(row)" text size="small" type="warning" @click="handleReparse(row)">
                     <el-icon><RefreshRight /></el-icon> 重新解析
                   </el-button>
+                  <el-badge v-if="row.issue_count" :value="row.issue_count" :max="99">
+                    <el-button text size="small" type="danger" @click="handleShowIssues(row)">
+                      <el-icon><Warning /></el-icon> 失败块
+                    </el-button>
+                  </el-badge>
+                  <el-button v-else-if="row.parse_status === 'failed' || row.parse_status === 'partial'"
+                             text size="small" type="info" @click="handleShowIssues(row)">
+                    <el-icon><Warning /></el-icon> 失败块
+                  </el-button>
                   <el-popconfirm title="删除后进入回收站，可恢复" @confirm="handleDelete(row)">
                     <template #reference>
                       <el-button text size="small" type="danger">
@@ -148,6 +157,42 @@
           <div v-if="previewText" class="preview-body">{{ previewText }}</div>
           <el-empty v-else description="暂无预览内容" />
         </el-dialog>
+
+        <!-- 失败块闭环（v2）：列表 + 重试/描述/替代图 -->
+        <el-dialog v-model="issuesVisible" :title="'失败块 - ' + activeFileName" width="720px" top="6vh">
+          <el-table :data="issues" stripe v-loading="issuesLoading" max-height="420"
+                    empty-text="暂无失败块">
+            <el-table-column label="页" width="60" align="center">
+              <template #default="{ row }">{{ row.page_no + 1 }}</template>
+            </el-table-column>
+            <el-table-column label="类型" width="80" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="issueTypeTag(row.block_type)">{{ issueTypeLabel(row.block_type) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="原因" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.reason }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="issueStatusTag(row.status)">{{ issueStatusLabel(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="190" align="center">
+              <template #default="{ row }">
+                <el-button text size="small" type="primary" :disabled="row.status === 'retrying'"
+                           @click="handleIssueRetry(row)">重试</el-button>
+                <el-button text size="small" type="success" :disabled="row.status === 'retrying'"
+                           @click="handleIssueDescribe(row)">描述</el-button>
+                <el-button text size="small" type="warning" :disabled="row.status === 'retrying'"
+                           @click="handleIssueReplace(row)">替代图</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <template #footer>
+            <el-button size="small" @click="issuesVisible = false">关闭</el-button>
+          </template>
+        </el-dialog>
       </div>
     </div>
   </Layout>
@@ -173,6 +218,12 @@ const previewText = ref('')
 const dirs = ref([])
 const currentDir = ref(null)
 const uploadProgress = ref(-1)   // -1=不显示；0-100=分片上传进度
+// 失败块（v2 闭环）
+const issuesVisible = ref(false)
+const issuesLoading = ref(false)
+const issues = ref([])
+const activeFileName = ref('')
+let activeFileId = null
 let pollTimer = null              // 解析状态轮询：有 pending/parsing 文件时定时刷新
 
 const currentDirName = computed(() => {
@@ -464,6 +515,95 @@ async function handleRename(row) {
   } catch (e) {
     ElMessage.error('重命名失败：' + (e.response?.data?.error || e.message))
   }
+}
+
+const ISSUE_STATUS_LABELS = {
+  pending: '待处理', retrying: '处理中', resolved: '已解决', failed: '失败', skipped: '已跳过', cancelled: '已取消'
+}
+
+const ISSUE_TYPE_LABELS = { image: '图片', table: '表格', text: '文本', paragraph: '段落' }
+
+function issueStatusLabel(s) {
+  return ISSUE_STATUS_LABELS[s] || s
+}
+
+function issueStatusTag(s) {
+  return { pending: 'warning', retrying: 'primary', resolved: 'success', failed: 'danger' }[s] || 'info'
+}
+
+function issueTypeLabel(t) {
+  return ISSUE_TYPE_LABELS[t] || t
+}
+
+function issueTypeTag(t) {
+  return { image: 'danger', table: 'warning', text: 'info', paragraph: 'info' }[t] || 'info'
+}
+
+async function handleShowIssues(row) {
+  activeFileId = row.id
+  activeFileName.value = row.filename
+  issuesVisible.value = true
+  issuesLoading.value = true
+  try {
+    const resp = await fileApi.listIssues(row.id)
+    issues.value = resp.data || []
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.response?.data?.error || '加载失败块失败')
+    issues.value = []
+  } finally {
+    issuesLoading.value = false
+  }
+}
+
+function refreshIssues() {
+  if (activeFileId == null) return
+  fileApi.listIssues(activeFileId).then(r => { issues.value = r.data || [] })
+    .catch(() => {})
+}
+
+async function handleIssueRetry(row) {
+  try {
+    await fileApi.retryIssue(row.id)
+    ElMessage.success('已提交重试（整文件重新解析）')
+    refreshIssues()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.response?.data?.error || '重试提交失败')
+  }
+}
+
+async function handleIssueDescribe(row) {
+  const { value } = await ElMessageBox.prompt(
+    '输入该失败块的文字描述（将写入知识库参与检索）', '描述失败块', {
+      confirmButtonText: '提交', cancelButtonText: '取消',
+      inputPlaceholder: '例如：图中展示的是系统架构，包含检索与生成两层',
+      inputValidator: v => (v && v.trim() ? true : '描述不能为空')
+    }).catch(() => ({ value: null }))
+  if (!value) return
+  try {
+    await fileApi.describeIssue(row.id, value.trim())
+    ElMessage.success('描述已写入知识库')
+    refreshIssues()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.response?.data?.error || '描述提交失败')
+  }
+}
+
+async function handleIssueReplace(row) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/*,.pdf'
+  input.onchange = async () => {
+    const file = input.files && input.files[0]
+    if (!file) return
+    try {
+      await fileApi.replaceIssue(row.id, file)
+      ElMessage.success('替代图已提交（异步替换，处理中）')
+      refreshIssues()
+    } catch (e) {
+      ElMessage.error(e.response?.data?.detail || e.response?.data?.error || '替代图提交失败')
+    }
+  }
+  input.click()
 }
 
 async function handleReparse(row) {
