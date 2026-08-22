@@ -131,35 +131,37 @@ CREATE TABLE IF NOT EXISTS parse_tasks (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ========== 5. user_file 同名唯一约束（存量重复先收敛：保留最早一条） ==========
--- 注意：旧外键（parse_tasks/rag_chunk）无 CASCADE，删除重复行前必须先行清理其引用行
+-- ========== 5. user_file 同名唯一：全量约束 → 部分唯一索引（坑位 #53：软删行不占命名空间） ==========
+-- 存量库：旧约束存在时直接 DROP（约束保证无重复，安全）；无约束的旧库先收敛重复（活跃行优先）
 DO $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'user_file_user_id_filename_key'
-    ) THEN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_file_user_id_filename_key') THEN
+        ALTER TABLE user_file DROP CONSTRAINT user_file_user_id_filename_key;
+    ELSE
+        -- 收敛重复：优先保留 status=1（活跃）行；同 status 保留 id 最小
         DELETE FROM parse_tasks WHERE file_id IN (
             SELECT u.id FROM user_file u
             WHERE EXISTS (SELECT 1 FROM user_file u2
                           WHERE u2.user_id = u.user_id AND u2.filename = u.filename
-                            AND u2.id < u.id)
+                            AND (u2.status > u.status OR (u2.status = u.status AND u2.id < u.id)))
         );
         DELETE FROM rag_chunk WHERE file_id IN (
             SELECT u.id FROM user_file u
             WHERE EXISTS (SELECT 1 FROM user_file u2
                           WHERE u2.user_id = u.user_id AND u2.filename = u.filename
-                            AND u2.id < u.id)
+                            AND (u2.status > u.status OR (u2.status = u.status AND u2.id < u.id)))
         );
         DELETE FROM user_file u
         WHERE EXISTS (
             SELECT 1 FROM user_file u2
             WHERE u2.user_id = u.user_id AND u2.filename = u.filename
-              AND u2.id < u.id
+              AND (u2.status > u.status OR (u2.status = u.status AND u2.id < u.id))
         );
-        ALTER TABLE user_file ADD CONSTRAINT user_file_user_id_filename_key
-            UNIQUE (user_id, filename);
     END IF;
 END $$;
+-- 部分唯一索引：仅 status=1（活跃）行唯一，软删行可同名重传（幂等：已存在则跳过）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_file_active_name
+    ON user_file(user_id, filename) WHERE status = 1;
 
 -- ========== 6. 热点索引补齐 ==========
 CREATE INDEX IF NOT EXISTS idx_qa_log_session ON qa_log(session_id);

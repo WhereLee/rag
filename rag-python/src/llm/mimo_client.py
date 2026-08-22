@@ -36,11 +36,12 @@ class LLMResult:
 
 class MiMoClient:
     def __init__(self, api_key: str = "", base_url: str = "", model: str = ""):
-        self.api_key = api_key or config.MIMO_API_KEY
-        self.base_url = (base_url or config.MIMO_BASE_URL).rstrip("/")
-        self.model = model or config.MIMO_MODEL
+        # 问答 LLM 用 LLM_* 配置（DeepSeek 等 OpenAI 兼容 API）；未配置时回退 MiMo（兼容旧 .env）
+        self.api_key = api_key or config.LLM_API_KEY
+        self.base_url = (base_url or config.LLM_BASE_URL).rstrip("/")
+        self.model = model or config.LLM_MODEL
         if not self.api_key:
-            raise LLMError("MIMO_API_KEY 未配置")
+            raise LLMError("LLM_API_KEY 未配置")
 
     def _headers(self) -> dict:
         return {
@@ -53,10 +54,16 @@ class MiMoClient:
         payload = {
             "model": self.model,
             "messages": messages,
-            "enable_thinking": thinking,
             "max_tokens": max_tokens,
             "stream": False,
         }
+        # 思考开关按提供商区分：
+        #   MiMo（LLM_ENABLE_THINKING=1）→ enable_thinking 参数（MiMo 特有）
+        #   DeepSeek 等（=0）→ thinking 对象（官方参数；默认已思考，显式控制开关）
+        if config.LLM_ENABLE_THINKING:
+            payload["enable_thinking"] = thinking
+        else:
+            payload["thinking"] = {"type": "enabled" if thinking else "disabled"}
         if temperature is not None:
             payload["temperature"] = temperature
         if response_json:
@@ -183,6 +190,8 @@ class MiMoClient:
         result = {
             "content": (msg.get("content") or "").strip(),
             "tool_calls": tool_calls,
+            # DeepSeek 等带 tools 的多轮请求必须回传 reasoning_content（否则 400）；MiMo 同字段无副作用
+            "reasoning_content": msg.get("reasoning_content") or "",
             "token_in": usage.get("prompt_tokens", 0),
             "token_out": usage.get("completion_tokens", 0),
             "elapsed_ms": elapsed_ms,

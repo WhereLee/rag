@@ -61,10 +61,12 @@ CREATE TABLE IF NOT EXISTS user_file (
     status SMALLINT DEFAULT 1,                -- 1正常 0已删除
     dir_id BIGINT REFERENCES user_dir(id),
     deleted_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    -- 同名并发双插兜底（应用层 SELECT 预检 + 唯一约束双保险）
-    UNIQUE (user_id, filename)
+    created_at TIMESTAMPTZ DEFAULT NOW()
+    -- 同名并发双插兜底：部分唯一索引（仅活跃行唯一，软删行不占命名空间）
+    -- 由下方 CREATE UNIQUE INDEX 提供（坑位 #53：全量 UNIQUE 导致软删后同名重传 500）
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_file_active_name
+    ON user_file(user_id, filename) WHERE status = 1;
 -- 注：idx_user_file_user / dir / deleted 索引在 init_chunk.sql 统一创建（存量库需先补列再建索引）
 
 -- 解析任务（worker 消费；file_id 主键=幂等；parsing 停留超时回收=崩溃恢复）

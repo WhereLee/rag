@@ -379,12 +379,13 @@ def tool_agent_node(state: AgentState) -> dict:
             }
 
         # 执行工具调用，结果回传 LLM
-        # 先添加 assistant 消息（包含 tool_calls）
+        # 先添加 assistant 消息（包含 tool_calls；DeepSeek 要求回传 reasoning_content 否则 400）
         tool_call_msgs = []
         for tc in result["tool_calls"]:
             tool_call_msgs.append({
                 "role": "assistant",
                 "content": None,
+                "reasoning_content": result.get("reasoning_content") or "",
                 "tool_calls": [{"id": tc["id"], "type": "function",
                                 "function": {"name": tc["name"],
                                              "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}}]

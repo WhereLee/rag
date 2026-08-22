@@ -22,12 +22,19 @@ def _int(name: str, default: int) -> int:
         return default
 
 
-# --- MiMo LLM ---
+# --- MiMo VLM（视觉/图片转录专用；问答 LLM 见下方 LLM_*） ---
 MIMO_API_KEY = os.getenv("MIMO_API_KEY", "")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
 MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5")
 LLM_TIMEOUT = _int("LLM_TIMEOUT", 120)          # 单次调用超时（秒）
 LLM_MAX_RETRIES = _int("LLM_MAX_RETRIES", 2)    # 失败重试次数
+
+# --- 问答 LLM（与 VLM 分离：DeepSeek 等 OpenAI 兼容 API；未配置时回退 MiMo，兼容旧 .env） ---
+LLM_API_KEY = os.getenv("LLM_API_KEY", "") or MIMO_API_KEY
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "") or MIMO_BASE_URL
+LLM_MODEL = os.getenv("LLM_MODEL", "") or MIMO_MODEL
+# MiMo 特有参数 enable_thinking 开关：DeepSeek 等不认该字段，置 0 不发（模型自选）
+LLM_ENABLE_THINKING = os.getenv("LLM_ENABLE_THINKING", "1") == "1"
 
 # --- 数据层 ---
 # 数据库连接串：无默认值（防部署时静默使用默认密码/默认库）；缺失时启动 fail-fast
