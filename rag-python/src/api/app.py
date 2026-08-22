@@ -173,7 +173,6 @@ def health():
 
 # 阶段性路由挂载（逐 Phase 放开）
 from api.ingest_api import router as ingest_router  # noqa: E402
-from api.rag_api import router as rag_router  # noqa: E402
 from api.eval_api import router as eval_router  # noqa: E402
 from api.agent_api import router as agent_router  # noqa: E402
 from api.feedback_api import router as feedback_router  # noqa: E402
@@ -181,7 +180,6 @@ from api.prompt_api import router as prompt_router  # noqa: E402
 from api.diagnosis_api import router as diagnosis_router  # noqa: E402
 from observability.tracing import setup_tracing  # noqa: E402
 app.include_router(ingest_router, prefix="/api/ingest")
-app.include_router(rag_router, prefix="/api/rag")
 app.include_router(eval_router, prefix="/api/eval")
 app.include_router(agent_router, prefix="/api/agent")
 app.include_router(feedback_router, prefix="/api/feedback")

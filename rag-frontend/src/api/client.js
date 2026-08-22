@@ -40,63 +40,6 @@ export const authApi = {
   }
 }
 
-// ===== Chat API =====
-export const chatApi = {
-  ask(query, sessionId = '') {
-    return http.post('/api/chat/ask', { query, session_id: sessionId })
-  },
-  askStream(query, sessionId = '', onChunk) {
-    // SSE 流式：使用 fetch 以便逐块读取（经 Vite proxy 到网关 8082）
-    const auth = useAuthStore()
-    return fetch('/api/chat/ask-stream', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${auth.token}`
-      },
-      body: JSON.stringify({ query, session_id: sessionId, stream: true })
-    }).then(response => {
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      function read() {
-        return reader.read().then(({ done, value }) => {
-          if (done) {
-            onChunk({ type: 'done' })
-            return
-          }
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-          for (const line of lines) {
-            // Spring SseEmitter 输出 data:{...}（无空格），Python 直出 data: {...}（有空格），统一兼容
-            const m = line.match(/^data:\s*(.*)$/)
-            if (m) {
-              const data = m[1].trim()
-              if (data === '[DONE]') {
-                onChunk({ type: 'done' })
-                return
-              }
-              try {
-                const parsed = JSON.parse(data)
-                onChunk(parsed)
-              } catch (e) {
-                // skip malformed
-              }
-            }
-          }
-          return read()
-        })
-      }
-      return read()
-    })
-  },
-  history(sessionId) {
-    return http.get(`/api/chat/history/${sessionId}`)
-  }
-}
-
 // ===== Qa API（新链路：网关 /api/qa/ask → Python 8091 SSE 透传）=====
 export const qaApi = {
   askStream(query, sessionId = '', onChunk, thinking = true, signal = null) {

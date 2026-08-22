@@ -36,7 +36,7 @@ public class AdminProxyController {
     /** GET 代理白名单前缀（查询类）。 */
     private static final List<String> GET_ALLOWED = List.of(
             "/api/eval", "/api/diagnosis", "/api/feedback", "/api/ingest",
-            "/api/admin", "/api/rag");
+            "/api/admin");
     /** POST 代理白名单前缀（管理操作类；不含 /api/ingest 写路径）。 */
     private static final List<String> POST_ALLOWED = List.of(
             "/api/eval", "/api/diagnosis", "/api/feedback", "/api/admin");
