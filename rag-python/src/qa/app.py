@@ -232,7 +232,7 @@ def _prepare_ask(req: AskRequest, user_id: int) -> dict:
         except Exception as e:
             print(f"[agent] run failed, fallback to direct: {e}", file=sys.stderr)
 
-    chunks = retrieve(user_id, query, top_k=5, dir_id=dir_id)
+    chunks = retrieve(user_id, query, top_k=5, dir_id=dir_id, cascade=True)
 
     # 拒答判定：无检索结果，或精排 logits 低于规范阈值（跨查询可比）
     rejected = False
@@ -537,7 +537,7 @@ async def ask(req: AskRequest, x_user_id: str = Header(default="")):
                 yield event("meta", rejected=False, citations=citations,
                             context_tokens=used_tokens, history_tokens=hist_tokens,
                             cache_ref=bool(cache_ref), memory_hits=len(memories),
-                            low_confidence=not chunks[0].reranked)
+                            low_confidence=not chunks[0].reranked and not chunks[0].rerank_skipped)
                 try:
                     # 思考过程逐块透出（thinking 事件，仅展示不落库）；正文仍走 delta
                     # thinking 开关：前端可关闭（省 reasoning token，但忠实度下降——E3 消融数据）；

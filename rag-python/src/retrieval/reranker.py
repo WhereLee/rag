@@ -2,7 +2,7 @@
 Reranker（CrossEncoder，ONNX INT8，bge-reranker-v2-m3）。
 
 - 全局单例（569MB 权重全进程只加载一份）
-- 信号量限流：最多 1 并发（CPU 推理饱和单核以上收益递减，防排队雪崩）
+- 信号量限流：默认 2 并发（4 核 = 2 线程 × 2 实例饱和；CPU 共享池 CFS 调度）
 - 排队超时 → RerankBusyError（上层降级 RRF 排序，与 pytxt 生产策略一致）
 """
 import logging
@@ -18,7 +18,7 @@ logger = logging.getLogger("rag.reranker")
 _session = None
 _tokenizer = None
 _lock = threading.Lock()
-_semaphore = threading.Semaphore(1)
+_semaphore = threading.Semaphore(config.RERANK_CONCURRENCY)
 
 
 class RerankBusyError(RuntimeError):
@@ -34,7 +34,7 @@ def _load():
                 from transformers import AutoTokenizer
                 path = config.MODELS_DIR / config.RERANK_MODEL_DIR
                 opts = ort.SessionOptions()
-                opts.intra_op_num_threads = config.ONNX_THREADS
+                opts.intra_op_num_threads = config.RERANK_THREADS
                 opts.inter_op_num_threads = 1
                 logger.info("加载 Reranker: %s", config.RERANK_MODEL_DIR)
                 _session = ort.InferenceSession(

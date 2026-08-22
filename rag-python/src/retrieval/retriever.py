@@ -32,6 +32,7 @@ BM25_STRONG_TOP = 5   # BM25 强命中保护窗口（rerank 低分时按关键�
 RRF_K = 60            # 倒数排名融合常数（原论文经验值）
 RERANK_TOP_N = 20     # 参与精排的候选数（黄金集对比实验：50→20 质量零损失，延迟降 3.3 倍）
 DEFAULT_TOP_K = 5     # 最终返回块数
+CASCADE_TOP_K = 3     # 级联共识窗口（同 config；模块内默认，防循环引用）
 
 # 查询停用词（保护判定的内容词提取用）：高频虚词/疑问词不构成“关键词命中”证据
 QUERY_STOPWORDS = {
@@ -55,7 +56,8 @@ class RetrievedChunk:
     heading_path: str
     page_no: Optional[int]
     score: float
-    reranked: bool = False   # False = 降级（RRF 原始分）
+    reranked: bool = False       # False = 降级（RRF 原始分）
+    rerank_skipped: bool = False  # True = 级联主动跳过（双通道共识，高置信而非降级）
 
 
 def _vector_search(user_id: int, query: str, top_n: int = VECTOR_TOP_N,
@@ -130,10 +132,39 @@ def _rrf(vec_rows: List[dict], bm25_rows: List[dict], k: int = RRF_K) -> List[di
     return [by_id[cid] for cid in order]
 
 
+def _consensus(vec_rows: List[dict], bm25_rows: List[dict], fused: List[dict],
+               window: int = None) -> bool:
+    """双通道共识：RRF 融合 top1 同时在向量 top-N 与 BM25 top-N → 强相关证据，免精排。
+    对 top1 约束而非“交集非空”：次优块共识不能给 top1 质量背书。
+    名次差不可靠（跨通道尺度不同），共识才是高质量信号（级联判据修正）。
+    占位块（图片/转录失败产物）无资格代表共识——词面可能被垃圾内容欺骗（refuse 题实证），
+    且 rerank 的价值恰恰是纠错这种误排，级联跳过等于丢掉纠错能力，必须有强证据背书。"""
+    if window is None:
+        window = getattr(config, "CASCADE_TOP_K", CASCADE_TOP_K)
+    if not vec_rows or not bm25_rows or not fused:
+        return False
+    top = fused[0]
+    from ingest.quality import PLACEHOLDER_MARKERS
+    # 低质量块排除：VLM 失败的图片块（"图片无法显示"等半垃圾内容）无资格代表共识——
+    # 词面可能被欺骗（refuse 越界题实证：query 词命中图片占位块），
+    # 且 rerank 的价值恰恰是纠错这种误排，级联跳过等于丢掉纠错能力，必须有强证据背书。
+    if top.get("chunk_type") == "image":
+        return False
+    if any(m in (top.get("content") or "") for m in PLACEHOLDER_MARKERS):
+        return False
+    top_id = top["id"]
+    vec_ids = {r["id"] for r in vec_rows[:window]}
+    bm25_ids = {r["id"] for r in bm25_rows[:window]}
+    return top_id in vec_ids and top_id in bm25_ids
+
+
 def retrieve(user_id: int, query: str, top_k: int = DEFAULT_TOP_K,
-             use_rerank: bool = True, dir_id: Optional[int] = None) -> List[RetrievedChunk]:
+             use_rerank: bool = True, dir_id: Optional[int] = None,
+             cascade: bool = False) -> List[RetrievedChunk]:
     """混合检索完整链路：向量 + BM25 → RRF 融合 → rerank 精排（异常降级）。
-    dir_id 非空时限定目录（目录级对话的检索范围）。"""
+    dir_id 非空时限定目录（目录级对话的检索范围）。
+    cascade=True 且双通道共识命中 → 主动跳过精排（rerank_skipped=True，高置信），
+    与降级（reranked=False，低置信）语义区分：调用方不可将级联跳过当低置信。"""
     vec_rows = _vector_search(user_id, query, dir_id=dir_id)
     bm25_rows = _bm25_search(user_id, query, dir_id=dir_id)
     fused = _rrf(vec_rows, bm25_rows)[:RERANK_TOP_N]
@@ -142,6 +173,12 @@ def retrieve(user_id: int, query: str, top_k: int = DEFAULT_TOP_K,
 
     if not use_rerank:
         return [_to_chunk(r, r.get("bm25", 0.0), reranked=False) for r in fused[:top_k]]
+
+    if cascade and _consensus(vec_rows, bm25_rows, fused):
+        # 级联：双通道共识 → 高置信免精排（省 CPU 秒级推理；命中率与误判率由黄金集验证）
+        logger.info("cascade: 双通道共识命中，跳过 rerank")
+        return [_to_chunk(r, r.get("bm25", 0.0), reranked=False,
+                          rerank_skipped=True) for r in fused[:top_k]]
 
     from retrieval.reranker import rerank
     try:
@@ -183,9 +220,10 @@ def retrieve(user_id: int, query: str, top_k: int = DEFAULT_TOP_K,
         return [_to_chunk(r, r.get("bm25", 0.0), reranked=False) for r in fused[:top_k]]
 
 
-def _to_chunk(r: dict, score: float, reranked: bool) -> RetrievedChunk:
+def _to_chunk(r: dict, score: float, reranked: bool,
+              rerank_skipped: bool = False) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=r["id"], file_id=r["file_id"], filename=r["filename"],
         chunk_type=r["chunk_type"], content=r["content"],
         heading_path=r["heading_path"], page_no=r["page_no"],
-        score=score, reranked=reranked)
+        score=score, reranked=reranked, rerank_skipped=rerank_skipped)

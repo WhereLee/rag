@@ -44,6 +44,15 @@ EMBED_MODEL_DIR = os.getenv("EMBED_MODEL_DIR", "bge-base-zh-v1.5-onnx-int8")
 RERANK_MODEL_DIR = os.getenv("RERANK_MODEL_DIR", "bge-reranker-base-onnx-int8")
 EMBED_BATCH_SIZE = _int("EMBED_BATCH_SIZE", 32)
 ONNX_THREADS = _int("ONNX_THREADS", 8)          # P 核绑定（i5-12500H）
+# 推理线程数拆分：embedding（短任务毫秒级）与 rerank（秒级 CPU 密集）分开配置，
+# 默认跟随 ONNX_THREADS（行为不变）；4 核服务器经 .env 覆盖（EMBED_THREADS=4 RERANK_THREADS=2）
+EMBED_THREADS = _int("EMBED_THREADS", ONNX_THREADS)
+RERANK_THREADS = _int("RERANK_THREADS", ONNX_THREADS)
+# rerank 并发推理实例数（信号量）：4 核 = 2 线程 × 2 实例恰饱和；
+# 公式：推理线程数 × 并发实例 ≈ 物理核数（CPU 共享池，CFS 调度，非独占核）
+RERANK_CONCURRENCY = _int("RERANK_CONCURRENCY", 2)
+# 级联 rerank 共识窗口：同一块同时在向量 top3 与 BM25 top3 → 高置信免精排
+CASCADE_TOP_K = _int("CASCADE_TOP_K", 3)
 
 # 推理前绑定线程数（必须在 import onnxruntime 前生效）
 os.environ.setdefault("OMP_NUM_THREADS", str(ONNX_THREADS))

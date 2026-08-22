@@ -82,6 +82,7 @@ def run_eval(name: str = "", regression_only: bool = False,
              engine: str = "baseline",
              exclude_types: tuple = (),
              use_rerank: bool = True,
+             cascade: bool = False,
              concurrency: int = 4) -> Dict:
     """跑一轮完整评估，落库 eval_run/eval_result，返回聚合指标。
 
@@ -124,7 +125,7 @@ def run_eval(name: str = "", regression_only: bool = False,
         # 新链路检索（rag_chunk）：retrieve 返回 RetrievedChunk 列表（含 content，无需再查库）。
         # exclude_types：新链路检索不支持检索期排除，改为召回后过滤（语义等价，量化 VLM 块价值仍有效）。
         chunks = retrieve(user_id=None, query=q["question"], top_k=top_k,
-                          use_rerank=use_rerank)   # user_id=None → 全量检索（评估用）
+                          use_rerank=use_rerank, cascade=cascade)   # user_id=None → 全量检索（评估用）
         if exclude_types:
             chunks = [c for c in chunks if c.chunk_type not in exclude_types]
         hit_ids = [c.chunk_id for c in chunks]

@@ -45,7 +45,7 @@ class Embedder:
         import onnxruntime as ort
         from transformers import AutoTokenizer
         sess_opts = ort.SessionOptions()
-        sess_opts.intra_op_num_threads = config.ONNX_THREADS
+        sess_opts.intra_op_num_threads = config.EMBED_THREADS
         sess_opts.inter_op_num_threads = 1
         self._session = ort.InferenceSession(
             str(self.path / "model.onnx"), sess_options=sess_opts,
