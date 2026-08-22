@@ -41,8 +41,12 @@ class TestEmbedTexts:
 
 
 # ---------- 真实 embedding 推理（模型加载一次，验证输出契约） ----------
+# 模型缺失（CI 无大模型文件）时跳过：requires_model 由 tests/conftest.py 定义
+from conftest import requires_model
+
 
 class TestEmbedBatch:
+    @requires_model
     def test_dim_and_count(self):
         vecs = embed_batch(["这是第一个测试文本，用于验证嵌入输出。",
                             "第二个测试文本，验证批量处理。",
@@ -50,12 +54,14 @@ class TestEmbedBatch:
         assert len(vecs) == 3
         assert all(len(v) == 768 for v in vecs)
 
+    @requires_model
     def test_normalized(self):
         import math
         vecs = embed_batch(["归一化验证文本"])
         norm = math.sqrt(sum(x * x for x in vecs[0]))
         assert abs(norm - 1.0) < 1e-4
 
+    @requires_model
     def test_similarity_ordering(self):
         # 同义文本应比无关文本更近（验证模型语义方向正确）
         import math
@@ -68,6 +74,7 @@ class TestEmbedBatch:
 
         assert cos(a, b) > cos(a, c)
 
+    @requires_model
     def test_empty(self):
         assert embed_batch([]) == []
 
