@@ -9,8 +9,8 @@ from typing import List
 
 from .parser.base import DocumentNode
 
-# 失败占位前缀（解析器/图片/VLM 降级产物）
-_PLACEHOLDER_MARKERS = ("[图片解析失败]", "[图片无法解析]", "[该页解析失败]", "[该页转录为空]")
+# 失败占位前缀（解析器/图片/VLM 降级产物）；worker 据此生成失败块 issue
+PLACEHOLDER_MARKERS = ("[图片解析失败]", "[图片无法解析]", "[该页解析失败]", "[该页转录为空]")
 
 SUSPICIOUS_MIN_TEXT = 10  # 无表格无图片时，文本低于此长度 → 可疑
 
@@ -36,7 +36,7 @@ def validate_nodes(nodes: List[DocumentNode], source: str = "") -> List[str]:
         issues.append(f"文本过短（{total_len} 字符且无表格/图片）")
 
     # 3. 失败占位统计（pipeline 用于判定 partial）
-    placeholders = [n for n in nodes if any(n.text.startswith(m) for m in _PLACEHOLDER_MARKERS)]
+    placeholders = [n for n in nodes if any(n.text.startswith(m) for m in PLACEHOLDER_MARKERS)]
     if placeholders:
         ratio = len(placeholders) / len(nodes)
         issues.append(f"{len(placeholders)}/{len(nodes)} 节点降级为失败占位（{ratio:.0%}）")

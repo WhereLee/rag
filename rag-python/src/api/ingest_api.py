@@ -1,43 +1,28 @@
 """
-入库 API：提交（异步任务）/ 任务状态 / 文档列表 / 删除。多租户版本。
+入库 API（v2：仅保留失败块闭环相关接口）。
 
-第一轮修复（异步任务化）：
-- POST /upload 校验文件后立即返回 202 {job_id}，重活交给 ingest.worker 后台执行
-- 新增 jobs 系列接口：进度查询 / 任务列表 / 失败重试
-- 文件持久化到 data/jobs/{doc_id}{suffix} 供 worker 读取（临时文件不再随请求删除）
+v2 变更（SQL 审查重构）：
+- 旧上传路径（/upload 走 sync_service 写 kb_document）已删除——上传统一走 Java 网关
+  文件域（user_file + parse_tasks + 分片上传），Python 侧不再有第二入口
+- 旧文档管理接口（/documents /status /chunks）已删除——等价能力在 MCP/Agent 工具（新链路）
+- issues 从 job 维度改为 file 维度（issue_items 挂 file_id，与解析任务解耦）
+- describe 兜底写 rag_chunk（旧版写 kb_chunk 导致检索永远读不到）
+- retry 走 parse_tasks 通道（重解析整文件，幂等）；replace 走 ingest_job（替代图替换）
 """
-import hashlib
 import json
-import re
-import shutil
-import tempfile
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body, Request
 from fastapi.responses import JSONResponse
 
 import config
-from ingest import sync_service, job_store
+from ingest import job_store
 
 router = APIRouter(tags=["ingest"])
 
-# ===== 安全配置 =====
-ALLOWED_SUFFIXES = {".pdf", ".md", ".docx", ".png", ".jpg", ".jpeg", ".txt"}
+# ===== 安全配置（与 Java 网关文件域一致） =====
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
-# 文件名清洗：仅保留字母、数字、中文、点、下划线、连字符
-SAFE_FILENAME_RE = re.compile(r"[^\w.\u4e00-\u9fff-]")
-
-
-def _sanitize_filename(raw: str) -> str:
-    """清洗文件名：移除路径穿越字符和危险字符。"""
-    # 只取文件名部分（防止 ../../etc/passwd）
-    name = Path(raw).name if raw else "upload.bin"
-    # 移除危险字符
-    safe = SAFE_FILENAME_RE.sub("_", name)
-    # 防止纯点号或空名
-    if not safe or safe == "." or safe == "..":
-        safe = "upload.bin"
-    return safe
 
 
 def _get_user_id(request: Request) -> int:
@@ -51,162 +36,92 @@ def _get_user_id(request: Request) -> int:
         raise HTTPException(400, "X-User-Id 必须是整数")
 
 
-def _file_hash_from_bytes(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
+def _file_owned(user_id: int, file_id: int) -> dict:
+    """归属校验：文件必须属于当前用户（不存在/不属于一律 404，不泄露存在性）。"""
+    from db import pg_store
+    row = pg_store.query_one(
+        "SELECT id, filename FROM user_file WHERE id=%s AND user_id=%s AND status=1",
+        (file_id, user_id))
+    if not row:
+        raise HTTPException(404, "文件不存在")
+    return row
 
 
-@router.post("/upload")
-async def upload(file: UploadFile = File(...), replace: bool = Query(False),
-                 request: Request = None):
-    """上传文件入库（异步任务：提交即 202，worker 后台执行解析+切块+向量化）。
+# ===== 失败块闭环 =====
 
-    去重快路径：同文件且当前用户已有映射 → 同步返回 200 {deduplicated}。
-    replace=True 替换同文件名旧文档。
-    """
-    user_id = _get_user_id(request) if request else None
-
-    # 安全校验 1：文件类型白名单
-    raw_name = file.filename or "upload.bin"
-    suffix = Path(raw_name).suffix.lower()
-    if suffix not in ALLOWED_SUFFIXES:
-        raise HTTPException(400, f"不支持的文件类型: {suffix}，允许: {', '.join(sorted(ALLOWED_SUFFIXES))}")
-
-    # 安全校验 2：文件大小限制（50MB）
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(413, f"文件过大（{len(content) // 1024 // 1024}MB），上限 50MB")
-
-    # 安全校验 3：文件名清洗
-    safe_name = _sanitize_filename(raw_name)
-
-    # 安全校验 4：magic bytes 内容嗅探（防伪装扩展名）
-    from ingest.magic import assert_content_type
-    assert_content_type(content[:32], suffix, safe_name)
-
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-
-        file_hash = _file_hash_from_bytes(content)
-        pre = sync_service.prepare_ingest(
-            tmp_path, user_id=user_id, user_title=Path(safe_name).stem,
-            replace=replace, filename_override=safe_name, file_hash=file_hash)
-        if pre.get("deduplicated"):
-            return {k: pre[k] for k in ("document_id", "status", "deduplicated",
-                                        "shared", "note") if k in pre}
-
-        # 持久化文件到 jobs 目录（worker 读取，不随请求删除）
-        jobs_dir = config.DATA_DIR / "jobs"
-        jobs_dir.mkdir(parents=True, exist_ok=True)
-        target = jobs_dir / f"{pre['document_id']}{suffix}"
-        shutil.move(str(tmp_path), str(target))
-        tmp_path = None  # 已 move，不再清理
-
-        trace_id = getattr(request.state, "request_id", "") if request else ""
-        job_key = hashlib.sha256(
-            f"{user_id}:{file_hash}:{int(replace)}".encode()).hexdigest()
-        jobinfo = job_store.create_job(
-            job_key, user_id, safe_name, pre["doc_type"], str(target),
-            pre["document_id"], file_hash, trace_id)
-        return JSONResponse(
-            {"job_id": jobinfo["id"], "status": "queued",
-             "document_id": pre["document_id"], "filename": safe_name},
-            status_code=202)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"入库失败：{e}")
-    finally:
-        # 未 move 的临时文件（异常路径）清理；Windows 文件锁延迟重试
-        if tmp_path is not None and tmp_path.exists():
-            import time
-            for attempt in range(3):
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                    break
-                except PermissionError:
-                    if attempt < 2:
-                        time.sleep(0.1)
-                    else:
-                        import logging
-                        logging.getLogger("rag.upload").warning(
-                            f"无法删除临时文件 {tmp_path}，文件被占用")
-
-
-# ===== 任务查询（异步化配套） =====
-
-@router.get("/jobs/{job_id}/issues")
-def job_issues(job_id: int, request: Request = None):
-    """失败块清单（第三轮：用户自决恢复入门）。"""
+@router.get("/files/{file_id}/issues")
+def file_issues(file_id: int, request: Request = None):
+    """失败块清单（文件维度）。"""
     from ingest import issue_store
     user_id = _get_user_id(request) if request else None
-    job = job_store.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "任务不存在")
-    if job["user_id"] != user_id:
-        raise HTTPException(403, "无权访问该任务")
-    return issue_store.list_issues(job_id)
+    _file_owned(user_id, file_id)
+    return issue_store.list_issues(file_id)
 
 
 @router.post("/issues/{issue_id}/retry")
 def retry_issue(issue_id: int, request: Request = None):
-    """提交单块重试（创建 block_retry job，202 异步）。"""
+    """重试失败块：置文件解析任务回 pending（整文件重解析，幂等），202 语义由任务通道保证。"""
+    from db import pg_store
     from ingest import issue_store
     user_id = _get_user_id(request) if request else None
     issue = issue_store.get_issue(issue_id)
     if not issue:
         raise HTTPException(404, "问题块不存在")
-    parent = job_store.get_job(issue["job_id"])
-    if not parent or parent["user_id"] != user_id:
-        raise HTTPException(403, "无权操作该问题块")
+    _file_owned(user_id, issue["file_id"])
+    if issue["status"] == "retrying":
+        raise HTTPException(409, "该问题块已在处理中")
     marked = issue_store.mark_retrying(issue_id)
     if marked is None:
         raise HTTPException(409, "该问题块已在处理中或已解决")
-    job_key = f"retry-issue-{issue_id}"
-    jobinfo = job_store.create_job(
-        job_key, user_id, parent["filename"], parent["doc_type"], parent["file_path"],
-        parent["document_id"], parent["file_hash"], "",
-        job_type="block_retry", issue_id=issue_id)
-    return JSONResponse({"job_id": jobinfo["id"], "status": "queued"},
-                        status_code=202)
+    try:
+        # 置回 pending（attempt 重置：issue 重试属手动操作，不受自动重试上限约束）；
+        # 无任务记录时兜底插入（ON CONFLICT 防并发双插）
+        pg_store.execute(
+            "INSERT INTO parse_tasks (file_id, status) VALUES (%s, 'pending') "
+            "ON CONFLICT (file_id) DO UPDATE SET status='pending', attempt=0, "
+            "error=NULL, updated_at=now()",
+            (issue["file_id"],))
+    except Exception as e:
+        issue_store.mark_failed(issue_id, f"入队失败: {e}")
+        raise HTTPException(500, f"重试入队失败：{e}")
+    return {"issue_id": issue_id, "status": "retrying", "action": "reparse"}
 
 
 @router.post("/issues/{issue_id}/replace")
 async def replace_issue(issue_id: int, request: Request = None,
                         file: UploadFile = File(...)):
-    """上传替代图（源图损坏时用户自备原图，多模态识别，202 异步）。"""
+    """上传替代图（源图损坏时用户自备原图），创建 block_retry 任务（202 异步）。"""
     from ingest import issue_store
     user_id = _get_user_id(request) if request else None
     issue = issue_store.get_issue(issue_id)
     if not issue:
         raise HTTPException(404, "问题块不存在")
-    parent = job_store.get_job(issue["job_id"])
-    if not parent or parent["user_id"] != user_id:
-        raise HTTPException(403, "无权操作该问题块")
-    if getattr(issue, "status", "pending") not in ("pending", "failed"):
-        raise HTTPException(409, "该问题块当前不可替换")
+    owned = _file_owned(user_id, issue["file_id"])
+    if issue["status"] == "retrying":
+        raise HTTPException(409, "该问题块已在处理中")
+    if issue["block_type"] != "image":
+        raise HTTPException(400, "仅图片类失败块支持替代图")
     content = await file.read()
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(413, "文件过大")
-    import hashlib
-    import shutil
+    if not content:
+        raise HTTPException(400, "替代图内容为空")
     alt_dir = Path(config.DATA_DIR) / "issue_alts"
     alt_dir.mkdir(parents=True, exist_ok=True)
     alt_path = alt_dir / f"issue_{issue_id}.png"
     alt_path.write_bytes(content)
-    # 写 alt 图地址进 issue resolution（供 worker retry 分支读取）
-    from db import pg_store
-    pg_store.execute("UPDATE issue_items SET resolution=%s, updated_at=NOW() WHERE id=%s",
-                     (f"replace:{alt_path}", issue_id))
     marked = issue_store.mark_retrying(issue_id)
     if marked is None:
-        raise HTTPException(409, "该问题块已在处理中")
+        raise HTTPException(409, "该问题块已在处理中或已解决")
+    # 写 alt 图地址进 issue resolution（worker replace 分支读取）
+    from db import pg_store
+    pg_store.execute(
+        "UPDATE issue_items SET resolution=%s, updated_at=NOW() WHERE id=%s",
+        (f"replace:{alt_path}", issue_id))
     job_key = f"retry-issue-{issue_id}"
     jobinfo = job_store.create_job(
-        job_key, user_id, parent["filename"], parent["doc_type"], parent["file_path"],
-        parent["document_id"], parent["file_hash"], "",
+        job_key, user_id, owned["filename"], "image", str(alt_path),
+        issue["file_id"], "replace", "",
         job_type="block_retry", issue_id=issue_id)
     return JSONResponse({"job_id": jobinfo["id"], "status": "queued"},
                         status_code=202)
@@ -214,16 +129,20 @@ async def replace_issue(issue_id: int, request: Request = None,
 
 @router.post("/issues/{issue_id}/describe")
 def describe_issue(issue_id: int, body: dict = Body(...), request: Request = None):
-    """文字描述兜底（同步：注入检测+长度限制，直接入 chunk）。"""
-    from ingest import issue_store
+    """文字描述兜底（同步：注入检测+长度限制，直接写入 rag_chunk + embedding）。
+
+    v2 修复：旧版写 kb_chunk（旧表），新链路检索 rag_chunk 永远读不到——功能静默失效；
+    现写入 rag_chunk（seq=max+1 追加，不重排现有块）。
+    """
     from db import pg_store
+    from ingest import issue_store
     user_id = _get_user_id(request) if request else None
     issue = issue_store.get_issue(issue_id)
     if not issue:
         raise HTTPException(404, "问题块不存在")
-    parent = job_store.get_job(issue["job_id"])
-    if not parent or parent["user_id"] != user_id:
-        raise HTTPException(403, "无权操作该问题块")
+    _file_owned(user_id, issue["file_id"])
+    if issue["status"] == "retrying":
+        raise HTTPException(409, "该问题块已在处理中")
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "描述内容不能为空")
@@ -236,21 +155,40 @@ def describe_issue(issue_id: int, body: dict = Body(...), request: Request = Non
     marked = issue_store.mark_retrying(issue_id)
     if marked is None:
         raise HTTPException(409, "该问题块已在处理中或已解决")
-    # append chunk（seq 最大+1，不重排现有 chunk）
-    max_seq = pg_store.query_one(
-        "SELECT coalesce(max(seq),-1) AS m FROM kb_chunk WHERE document_id=%s",
-        (issue["document_id"],))
-    pg_store.execute(
-        """INSERT INTO kb_chunk (document_id, chunk_type, page_no, seq, content, chars, status, meta)
-           VALUES (%s,%s,%s,%s,%s,%s,1,%s)""",
-        (issue["document_id"], "text", issue["page_no"], (max_seq["m"] + 1),
-         text, len(text), json.dumps({"source": "user_describe", "issue_id": issue_id})))
-    # BM25 失效 + 语义缓存失效
-    from retrieval import bm25_index, semantic_cache
-    bm25_index.bump_version()
-    semantic_cache.invalidate(user_id)
-    issue_store.mark_resolved(issue_id, "describe")
+    try:
+        from pgvector.psycopg import register_vector
+        from ingest.embedder import embed_batch
+        from ingest.indexer import EMBED_MODEL
+        file_id = issue["file_id"]
+        # seq 追加（max+1，不重排现有块）；并发双插用 ON CONFLICT 覆盖兜底
+        max_seq = pg_store.query_one(
+            "SELECT coalesce(max(seq),-1) AS m FROM rag_chunk WHERE file_id=%s",
+            (file_id,))
+        vec = embed_batch([text])[0]
+        with pg_store.connect() as conn:
+            register_vector(conn)
+            conn.execute(
+                """INSERT INTO rag_chunk (file_id, chunk_type, seq, content, chars,
+                                          heading_path, page_no, embedding, embed_model)
+                   VALUES (%s,'text',%s,%s,%s,'',%s,%s,%s)
+                   ON CONFLICT (file_id, seq) DO UPDATE SET
+                     content=EXCLUDED.content, chars=EXCLUDED.chars,
+                     embedding=EXCLUDED.embedding, embed_model=EXCLUDED.embed_model""",
+                (file_id, max_seq["m"] + 1, text, len(text),
+                 issue.get("page_no"), vec, EMBED_MODEL))
+        # 文件内容变化 → 语义缓存失效（BM25 为查询期全量构建，无需失效）
+        from retrieval import semantic_cache
+        semantic_cache.invalidate(user_id)
+        issue_store.mark_resolved(issue_id, "describe")
+    except Exception as e:
+        issue_store.mark_failed(issue_id, f"描述写入失败: {e}")
+        logger = logging.getLogger("rag.ingest_api")
+        logger.exception("describe issue failed: %s", e)
+        raise HTTPException(500, f"描述写入失败：{e}")
     return {"issue_id": issue_id, "status": "resolved", "action": "describe"}
+
+
+# ===== 块重试任务查询（replace 场景） =====
 
 @router.get("/jobs/{job_id}")
 def job_status(job_id: int, request: Request = None):
@@ -284,62 +222,3 @@ def retry_job(job_id: int, request: Request = None):
         raise HTTPException(400, f"当前状态 {job['status']} 不可重试")
     updated = job_store.retry_job(job_id)
     return {"job_id": job_id, "status": updated["status"] if updated else "error"}
-
-
-@router.post("/ingest-path")
-def ingest_path(path: str = Body(..., embed=True), replace: bool = Query(True),
-                request: Request = None):
-    """多租户模式下禁用：允许读取服务器任意文件，存在安全风险。
-    请使用 /upload 接口上传文件。"""
-    raise HTTPException(403, "多租户模式下 ingest-path 已禁用，请使用 /upload 上传文件")
-
-
-@router.delete("/documents/{doc_id}")
-def delete(doc_id: int, request: Request = None):
-    """删除文档（多租户：只删映射，引用归零才清理底层数据）。"""
-    user_id = _get_user_id(request) if request else None
-    try:
-        return sync_service.delete_document(doc_id, user_id=user_id)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-
-
-@router.get("/status/{doc_id}")
-def status(doc_id: int):
-    doc = sync_service.document_status(doc_id)
-    if not doc:
-        raise HTTPException(404, "文档不存在")
-    doc["created_at"] = str(doc["created_at"])
-    return doc
-
-
-@router.get("/documents")
-def documents(request: Request = None):
-    """列出当前用户的文档（多租户过滤）。"""
-    user_id = _get_user_id(request) if request else None
-    docs = sync_service.list_documents(user_id=user_id)
-    for d in docs:
-        d["created_at"] = str(d["created_at"])
-    return docs
-
-
-@router.get("/documents/{doc_id}/chunks")
-def document_chunks(doc_id: int, limit: int = 50, request: Request = None):
-    """文档分块只读抽查（解析质量人工审查用）。"""
-    from db import pg_store
-    user_id = _get_user_id(request) if request else None
-    # 权限校验：用户必须拥有该文档
-    if user_id is not None:
-        ownership = pg_store.query_one(
-            "SELECT id FROM kb_user_document WHERE user_id=%s AND document_id=%s",
-            (user_id, doc_id))
-        if not ownership:
-            raise HTTPException(403, "无权访问该文档")
-    doc = sync_service.document_status(doc_id)
-    if not doc:
-        raise HTTPException(404, "文档不存在")
-    rows = pg_store.query(
-        """SELECT id, chunk_type, page_no, seq, content, status
-           FROM kb_chunk WHERE document_id=%s ORDER BY seq LIMIT %s""",
-        (doc_id, limit))
-    return {"document": doc, "chunks": rows}

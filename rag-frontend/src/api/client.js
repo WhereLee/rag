@@ -248,58 +248,6 @@ export const fileApi = {
   }
 }
 
-// ===== Ingest API（走网关代理，user_id 服务端注入；上传异步任务化）=====
-export const ingestApi = {
-  upload(file, replace = false) {
-    const formData = new FormData()
-    formData.append('file', file)
-    if (replace) {
-      formData.append('replace', 'true')
-    }
-    // 202 语义：立即返回 { job_id, status:"queued" }；或去重快路径 200
-    return http.post('/api/admin/proxy/api/ingest/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-  },
-  job(jobId) {
-    return http.get(`/api/admin/proxy/api/ingest/jobs/${jobId}`)
-  },
-  listJobs(limit = 10) {
-    return http.get('/api/admin/proxy/api/ingest/jobs', { params: { limit } })
-  },
-  retryJob(jobId) {
-    return http.post(`/api/admin/proxy/api/ingest/jobs/${jobId}/retry`)
-  },
-  jobIssues(jobId) {
-    return http.get(`/api/admin/proxy/api/ingest/jobs/${jobId}/issues`)
-  },
-  retryIssue(issueId) {
-    return http.post(`/api/admin/proxy/api/ingest/issues/${issueId}/retry`)
-  },
-  replaceIssue(issueId, file) {
-    const formData = new FormData()
-    formData.append('file', file)
-    return http.post(`/api/admin/proxy/api/ingest/issues/${issueId}/replace`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-  },
-  describeIssue(issueId, text) {
-    return http.post(`/api/admin/proxy/api/ingest/issues/${issueId}/describe`, { text })
-  },
-  listDocuments() {
-    return http.get('/api/admin/proxy/api/ingest/documents')
-  },
-  documentStatus(docId) {
-    return http.get(`/api/admin/proxy/api/ingest/status/${docId}`)
-  },
-  documentChunks(docId, limit = 50) {
-    return http.get(`/api/admin/proxy/api/ingest/documents/${docId}/chunks`, { params: { limit } })
-  },
-  deleteDocument(docId) {
-    return http.delete(`/api/admin/proxy/api/ingest/documents/${docId}`)
-  }
-}
-
 // ===== Feedback API（网关注入 user_id）=====
 export const feedbackApi = {
   submit(qaLogId, rating, correction = '') {

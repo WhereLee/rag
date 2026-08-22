@@ -102,13 +102,17 @@ PG_POOL_MAX=10
 
 ```bash
 cd rag
-# 1. 建库 + 基础表（kb_user/user_file/kb_chunk/目录/会话等）
+# 1. 建库 + 完整 schema（v2 统一入口：24 张表全部在此，含旧表下线/索引/约束）
 python scripts/init_db.py
-# 2. 分块表 + 问答存档表（rag_chunk/qa_cache/memory_entry 等，幂等可重跑）
+# 2. 存量库升级（新库也必须跑：幂等补列/索引/旧表清理，可重复执行）
 PGCLIENTENCODING=UTF8 psql -h 127.0.0.1 -U rag_app -d rag_kb -f scripts/init_chunk.sql
 # 3. 管理员账号（仅初始化脚本创建，注册接口不接受 role=admin）
 #    按 init_db.sql 注释中的示例创建；生产必须立即改默认密码
 ```
+
+**存量库 v1→v2 升级注意**（升级脚本已幂等处理，但需知悉）：
+- `kb_document` / `kb_chunk` / `kb_user_document` 旧链路表将被删除（旧数据为历史测试数据，评估/反馈/MCP/Agent 已全部切新链路）
+- `ingest_job` / `issue_items` 重建为 file_id 维度（旧队列死任务清空）
 
 **坑位对照**：数据库账号不要用 postgres 超级用户跑应用——建专用 `rag_app` 账号并只授权 rag_kb 库（`GRANT ALL ON DATABASE rag_kb TO rag_app;` + 表级授权）。
 

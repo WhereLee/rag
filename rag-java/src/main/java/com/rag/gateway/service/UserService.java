@@ -51,10 +51,10 @@ public class UserService {
         }
         String hash = encoder.encode(password);
         try {
-            jdbc.update("INSERT INTO kb_user (username, password_hash, salt, role) VALUES (?,?,?,?)",
-                    username, hash, "", "user");
+            jdbc.update("INSERT INTO kb_user (username, password_hash, role) VALUES (?,?,?)",
+                    username, hash, "user");
         } catch (org.springframework.dao.DuplicateKeyException e) {
-            // 并发竞态兑底：SELECT 预检后另一个请求已插入同用户名，唯一约束冲突 → 友好提示
+            // 并发竞态兜底：SELECT 预检后另一个请求已插入同用户名，唯一约束冲突 → 友好提示
             throw new IllegalArgumentException("用户名已存在");
         }
         return Map.of("username", username, "created", true);

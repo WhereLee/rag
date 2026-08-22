@@ -23,7 +23,7 @@ def test_create_and_claim_flow():
     """创建 → 抢任务 → running 带租约 → 完成置 done。"""
     job = job_store.create_job(
         job_key="t1_k1", user_id=1, filename="a.md", doc_type="markdown",
-        file_path="/tmp/a.md", document_id=1, file_hash="x" * 64, trace_id="t1")
+        file_path="/tmp/a.md", file_id=1, file_hash="x" * 64, trace_id="t1")
     assert job["status"] == "queued"
 
     claimed = job_store.claim_next()
@@ -45,10 +45,10 @@ def test_idempotent_create():
     """同 job_key 并发双插只保留一条（唯一约束兜底）。"""
     job1 = job_store.create_job(
         job_key="t2_dup", user_id=2, filename="b.pdf", doc_type="pdf",
-        file_path="/tmp/b.pdf", document_id=2, file_hash="y" * 64)
+        file_path="/tmp/b.pdf", file_id=2, file_hash="y" * 64)
     job2 = job_store.create_job(
         job_key="t2_dup", user_id=2, filename="b.pdf", doc_type="pdf",
-        file_path="/tmp/b.pdf", document_id=2, file_hash="y" * 64)
+        file_path="/tmp/b.pdf", file_id=2, file_hash="y" * 64)
     assert job1["id"] == job2["id"]
     rows = pg_store.query("SELECT count(*) AS n FROM ingest_job WHERE job_key='t2_dup'")
     assert rows[0]["n"] == 1
@@ -59,7 +59,7 @@ def test_failed_backoff_and_dead():
     """失败退避：attempt 递增、未超限回 queued 且带退避时间；超限进 dead。"""
     job = job_store.create_job(
         job_key="t3_k", user_id=1, filename="c.txt", doc_type="text",
-        file_path="/tmp/c.txt", document_id=1, file_hash="z" * 64)
+        file_path="/tmp/c.txt", file_id=1, file_hash="z" * 64)
     jid = job["id"]
 
     r1 = job_store.mark_failed(jid, "boom1")
@@ -93,7 +93,7 @@ def test_lease_expiry_reclaim():
     """租约过期任务可被回收（worker 崩溃恢复语义）。"""
     job = job_store.create_job(
         job_key="t4_k", user_id=1, filename="d.txt", doc_type="text",
-        file_path="/tmp/d.txt", document_id=1, file_hash="w" * 64)
+        file_path="/tmp/d.txt", file_id=1, file_hash="w" * 64)
     jid = job["id"]
 
     # 模拟占位后过期：直接置 running + 过去时间
@@ -111,7 +111,7 @@ def test_progress_detail_series():
     key = "t5_" + uuid.uuid4().hex[:8]
     job = job_store.create_job(
         job_key=key, user_id=1, filename="e.md", doc_type="markdown",
-        file_path="/tmp/e.md", document_id=1, file_hash="v" * 64)
+        file_path="/tmp/e.md", file_id=1, file_hash="v" * 64)
     jid = job["id"]
     try:
         # 置于退避中（queued + 未来 lease）：worker 不会抢，本测试专注更新/状态写路径

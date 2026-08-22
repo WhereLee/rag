@@ -1,14 +1,19 @@
 """
-Issue 存取层（第三轮：失败块闭环）。
+Issue 存取层（失败块闭环 v2：挂 file_id 维度）。
 
-职责边界：只读写 issue_items 表，不含识别/入库逻辑。
+v2 设计变更（SQL 审查重构）：
+- 旧版依赖 ingest_job（job_id 外键）+ kb_document（document_id 外键），但解析链路实际走
+  parse_tasks（无 ingest_job），且旧表已下线 → issue 直接挂 user_file（file_id），
+  与解析任务解耦，worker 解析后按文件同步（create_batch / resolve_for_file）。
+- 幂等：UNIQUE(file_id, page_no, block_order, block_type) + ON CONFLICT DO NOTHING
+  （重复解析/重试不产生重复 issue）。
 
 状态机：
   pending → retrying → resolved | failed
   pending → skipped（用户放弃）
-  pending → cancelled（文档 replace 软删时批量取消）
+  pending → cancelled（文件 replace 软删时批量取消）
 
-并发控制（审查修订 R3）：所有状态流转用乐观锁
+并发控制：所有状态流转用乐观锁
   UPDATE ... WHERE id=%s AND status=<expected> RETURNING *
 保证并发双点同一 issue 只有一次成功，避免重复 chunk。
 """
@@ -41,11 +46,11 @@ def _row_to_dict(r):
     return d
 
 
-def create_batch(job_id: int, document_id: int, blocks_errors: list[dict],
+def create_batch(file_id: int, blocks_errors: list[dict],
                  bbox_by_key: dict = None) -> int:
-    """批量落 issue（worker 完成解析后调用，从 stats.page_errors + 块 bbox 生成）。
+    """批量落 issue（worker 解析后调用，从占位节点生成）。
 
-    blocks_errors: [{page, block, type, reason, bbox}]；已有则按 key 幂等跳过。
+    blocks_errors: [{page, block, type, reason, bbox}]；同键（file+page+block+type）幂等跳过。
     bbox_by_key: {(page, block): [x0,y0,x1,y1]} 供补 bbox。
     """
     added = 0
@@ -55,26 +60,23 @@ def create_batch(job_id: int, document_id: int, blocks_errors: list[dict],
         btype = e.get("type", "text")
         reason = e.get("reason", "")[:2000]
         bbox = bbox_by_key.get(f"{page}:{block}") if bbox_by_key else None
-        exists = pg_store.query_one(
-            """SELECT id FROM issue_items
-               WHERE job_id=%s AND page_no=%s AND block_order=%s AND block_type=%s""",
-            (job_id, page, block, btype))
-        if exists:
-            continue
         pg_store.execute(
             """INSERT INTO issue_items
-               (job_id, document_id, page_no, block_order, block_type, reason, bbox)
-               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-            (job_id, document_id, page, block, btype, reason,
+               (file_id, page_no, block_order, block_type, reason, bbox)
+               VALUES (%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (file_id, page_no, block_order, block_type) DO NOTHING""",
+            (file_id, page, block, btype, reason,
              json.dumps(bbox) if bbox else None))
         added += 1
+    if added:
+        logger.info("issues batch created: file=%s n=%d", file_id, added)
     return added
 
 
-def list_issues(job_id: int) -> list[dict]:
+def list_issues(file_id: int) -> list[dict]:
     rows = pg_store.query(
-        """SELECT * FROM issue_items WHERE job_id=%s ORDER BY page_no, block_order""",
-        (job_id,))
+        """SELECT * FROM issue_items WHERE file_id=%s ORDER BY page_no, block_order""",
+        (file_id,))
     return [_row_to_dict(r) for r in rows]
 
 
@@ -113,11 +115,34 @@ def mark_skipped(issue_id: int) -> None:
         (SKIPPED, issue_id, PENDING, FAILED))
 
 
-def cancel_for_document(document_id: int) -> int:
-    """文档 replace 软删时批量取消 pending issue（审查修订 R5）。"""
+def resolve_for_file(file_id: int, resolution: str = "auto:parsed") -> int:
+    """文件重新解析成功后，自动解决该文件全部待处理 issue（v2 闭环收尾）。"""
+    row = pg_store.query_one(
+        """UPDATE issue_items SET status=%s, resolution=%s, updated_at=NOW()
+           WHERE file_id=%s AND status IN (%s,%s)
+           RETURNING count(*) AS n""",
+        (RESOLVED, resolution, file_id, PENDING, RETRYING))
+    n = (row or {}).get("n", 0)
+    if n:
+        logger.info("issues auto-resolved: file=%s n=%d", file_id, n)
+    return n
+
+
+def reset_retrying(file_id: int) -> int:
+    """解析完成仍有占位：retrying 的 issue 重置回 pending（允许用户再次操作）。"""
     row = pg_store.query_one(
         """UPDATE issue_items SET status=%s, updated_at=NOW()
-           WHERE document_id=%s AND status IN (%s,%s)
+           WHERE file_id=%s AND status=%s
            RETURNING count(*) AS n""",
-        (CANCELLED, document_id, PENDING, FAILED))
+        (PENDING, file_id, RETRYING))
+    return (row or {}).get("n", 0)
+
+
+def cancel_for_file(file_id: int) -> int:
+    """文件软删时批量取消 pending issue。"""
+    row = pg_store.query_one(
+        """UPDATE issue_items SET status=%s, updated_at=NOW()
+           WHERE file_id=%s AND status IN (%s,%s)
+           RETURNING count(*) AS n""",
+        (CANCELLED, file_id, PENDING, FAILED))
     return (row or {}).get("n", 0)

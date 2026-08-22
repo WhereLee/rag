@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "rag-python" / "src
 from db import pg_store
 
 r = pg_store.query_one("SELECT count(*) AS n FROM information_schema.tables WHERE table_schema='public'")
-dims = pg_store.query_one("SELECT atttypmod FROM pg_attribute WHERE attrelid='kb_chunk'::regclass AND attname='embedding'")
+dims = pg_store.query_one("SELECT atttypmod FROM pg_attribute WHERE attrelid='rag_chunk'::regclass AND attname='embedding'")
 assert r["n"] >= 14, r
 print(f"[PASS] pg: tables={r['n']} embed_dim={dims['atttypmod']}")
 pg_store.close()

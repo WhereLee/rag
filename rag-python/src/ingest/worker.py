@@ -17,6 +17,8 @@ import config
 from db.pg_store import connect
 from ingest.indexer import ingest
 from ingest.pipeline import parse_file
+from ingest.parser.base import DocumentNode
+from ingest.quality import PLACEHOLDER_MARKERS
 
 logger = logging.getLogger("rag.worker")
 
@@ -123,6 +125,11 @@ def process_task(task: dict) -> None:
             _finish(file_id, "failed", f"入库失败: {e}", payload["duration_ms"],
                     len(result.nodes))
             return
+        # 失败块闭环：入库成功后同步 issue（无占位自动解决；有占位新增/重置）
+        try:
+            _sync_issues(file_id, result)
+        except Exception as e:
+            logger.warning("issues sync failed file_id=%s: %s", file_id, e)
         _finish(file_id, result.status, result.error, payload["duration_ms"],
                 len(result.nodes), chunk_count)
     else:
@@ -130,6 +137,110 @@ def process_task(task: dict) -> None:
                 len(result.nodes))
     logger.info("parsed file_id=%s status=%s nodes=%d err=%s",
                 file_id, result.status, len(result.nodes), result.error or "-")
+
+
+def _extract_placeholders(result) -> tuple[list[dict], dict]:
+    """从解析结果提取占位节点（失败块）→ issue 输入（page/block/type/reason/bbox）。
+
+    block 用节点在解析产物中的序号（同文件同解析器顺序稳定，重试可定位）。
+    """
+    blocks_errors, bbox_by_key = [], {}
+    for i, n in enumerate(result.nodes):
+        if any(n.text.startswith(m) for m in PLACEHOLDER_MARKERS):
+            page = n.meta.get("page") or 0
+            blocks_errors.append({
+                "page": page,
+                "block": i,
+                "type": n.type,
+                "reason": n.text[:2000],
+            })
+            if n.meta.get("bbox"):
+                bbox_by_key[f"{page}:{i}"] = n.meta["bbox"]
+    return blocks_errors, bbox_by_key
+
+
+def _sync_issues(file_id: int, result) -> None:
+    """解析完成后同步失败块 issue（v2 闭环）：
+    - 无占位节点 → 该文件全部 pending/retrying issue 自动 resolved（重试成功收尾）
+    - 有占位节点 → 新增/刷新 issue（幂等），retrying 重置回 pending（允许再次操作）
+    """
+    from ingest import issue_store
+    blocks_errors, bbox_by_key = _extract_placeholders(result)
+    if not blocks_errors:
+        issue_store.resolve_for_file(file_id)
+    else:
+        issue_store.create_batch(file_id, blocks_errors, bbox_by_key)
+        issue_store.reset_retrying(file_id)
+
+
+def process_retry_job(job: dict) -> None:
+    """消费 ingest_job（job_type=block_retry，替代图替换场景）：
+    解析替代图 → 替换原解析产物中目标页节点 → 重新入库 → issue resolved。
+    失败走 mark_failed（指数退避重试），终态 mark_done/mark_dead。
+    """
+    from ingest import issue_store, job_store
+    issue = issue_store.get_issue(job["issue_id"]) if job.get("issue_id") else None
+    if not issue:
+        job_store.mark_dead(job["id"], "issue 不存在")
+        return
+    resolution = issue.get("resolution") or ""
+    if not resolution.startswith("replace:"):
+        job_store.mark_dead(job["id"], f"resolution 非法: {resolution}")
+        issue_store.mark_failed(issue["id"], "任务死信（resolution 非法）")
+        return
+    alt_path = Path(resolution[len("replace:"):])
+    if not alt_path.exists():
+        job_store.mark_dead(job["id"], f"替代图缺失: {alt_path}")
+        issue_store.mark_failed(issue["id"], f"替代图缺失: {alt_path}")
+        return
+
+    alt_result = parse_file(alt_path, timeout=TIMEOUT)
+    if alt_result.status == "failed" or not alt_result.nodes:
+        job_store.mark_failed(job["id"], f"替代图解析失败: {alt_result.error}")
+        issue_store.mark_failed(issue["id"], f"替代图解析失败: {alt_result.error}")
+        return
+
+    # 读原解析产物（data/parsed/{file_id}.json），替换目标页节点（保持顺序）
+    payload_path = config.PARSED_DIR / f"{issue['file_id']}.json"
+    if not payload_path.exists():
+        job_store.mark_failed(job["id"], "原解析产物缺失")
+        issue_store.mark_failed(issue["id"], "原解析产物缺失")
+        return
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        nodes = [DocumentNode(t, text, meta) for t, text, meta in payload.get("nodes", [])]
+    except Exception as e:
+        job_store.mark_failed(job["id"], f"原解析产物读取失败: {e}")
+        issue_store.mark_failed(issue["id"], f"原解析产物读取失败: {e}")
+        return
+
+    page = issue.get("page_no") or 0
+    for n in alt_result.nodes:      # 替代图解析结果修正页号/来源
+        n.meta["page"] = page
+        n.meta["source"] = job.get("filename") or payload.get("file_id")
+    new_nodes, inserted = [], False
+    for n in nodes:
+        if (n.meta.get("page") or 0) == page and not inserted:
+            new_nodes.extend(alt_result.nodes)
+            inserted = True
+        if (n.meta.get("page") or 0) != page:
+            new_nodes.append(n)
+    if not inserted:
+        new_nodes.extend(alt_result.nodes)
+    if not new_nodes:
+        job_store.mark_failed(job["id"], "替换后无节点")
+        issue_store.mark_failed(issue["id"], "替换后无节点")
+        return
+    try:
+        ingest(issue["file_id"], new_nodes)
+    except Exception as e:
+        logger.exception("replace ingest failed issue=%s: %s", issue["id"], e)
+        job_store.mark_failed(job["id"], f"入库失败: {e}")
+        issue_store.mark_failed(issue["id"], f"入库失败: {e}")
+        return
+    issue_store.mark_resolved(issue["id"], "replaced")
+    job_store.mark_done(job["id"], {"action": "replace", "nodes": len(new_nodes)})
+    logger.info("issue %s replaced (file=%s)", issue["id"], issue["file_id"])
 
 
 def main() -> None:
@@ -141,6 +252,15 @@ def main() -> None:
             recover_stale()
             task = claim_next()
             if task is None:
+                # 主解析队列空闲 → 消费失败块替换队列（ingest_job，block_retry）
+                from ingest import job_store
+                job = job_store.claim_next()
+                if job is not None:
+                    t0 = time.time()
+                    logger.info("claim job id=%s type=%s", job["id"], job.get("job_type"))
+                    process_retry_job(job)
+                    logger.info("done job id=%s in %.1fs", job["id"], time.time() - t0)
+                    continue
                 time.sleep(POLL_INTERVAL)
                 continue
             t0 = time.time()

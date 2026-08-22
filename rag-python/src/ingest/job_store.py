@@ -38,20 +38,21 @@ def _row_to_dict(r) -> dict | None:
 
 
 def create_job(job_key: str, user_id: int, filename: str, doc_type: str,
-               file_path: str, document_id: int, file_hash: str,
-               trace_id: str = "", job_type: str = "full", issue_id: int = None) -> dict:
+               file_path: str, file_id: int, file_hash: str,
+               trace_id: str = "", job_type: str = "block_retry", issue_id: int = None) -> dict:
     """创建任务。job_key 冲突（并发双插）时返回已存在任务。
 
-    第三轮：job_type='block_retry' 表示单块重试（issue_id 指向 issue_items）。
+    v2：file_id 指向 user_file（旧版 document_id 指向已下线的 kb_document）；
+    job_type 仅 block_retry（替代图替换场景），full 任务已随旧上传路径废弃。
     """
     row = pg_store.query_one(
         """INSERT INTO ingest_job
-              (job_key, user_id, filename, doc_type, file_path, document_id, file_hash,
+              (job_key, user_id, filename, doc_type, file_path, file_id, file_hash,
                trace_id, job_type, issue_id)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (job_key) DO UPDATE SET updated_at=NOW()
            RETURNING id, status""",
-        (job_key, user_id, filename, doc_type, file_path, document_id, file_hash,
+        (job_key, user_id, filename, doc_type, file_path, file_id, file_hash,
          trace_id, job_type, issue_id))
     return {"id": row["id"], "status": row["status"]}
 

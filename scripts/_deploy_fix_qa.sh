@@ -5,8 +5,8 @@ cd /opt/rag
 PW=$(sed -n 's|.*rag_app:\([^@]*\)@.*|\1|p' /opt/rag/.env)
 export PGPASSWORD="$PW"
 
-echo "== 1/3 migrate_upload_v3.sql =="
-psql -h 127.0.0.1 -U rag_app -d rag_kb -v ON_ERROR_STOP=1 -f scripts/migrate_upload_v3.sql
+echo "== 1/3 init_chunk.sql (v2 schema upgrade) =="
+psql -h 127.0.0.1 -U rag_app -d rag_kb -v ON_ERROR_STOP=1 -f scripts/init_chunk.sql
 
 echo "== 2/3 models permission =="
 sudo chmod -R a+rX /opt/rag/rag-python/models
