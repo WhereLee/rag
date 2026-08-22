@@ -25,6 +25,13 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 mcp = MCPServer("rag-knowledge-base",
                 description="智能文档问答知识库：检索/问答/文档状态查询")
 
+# 新链路解析状态映射（parse_tasks.status → 中文；user_file 只有 正常/已删除）
+_STATUS_MAP = {"pending": "处理中", "parsing": "处理中", "done": "已入库", "failed": "失败"}
+
+
+def _parse_status(s: str | None) -> str:
+    return _STATUS_MAP.get(s or "", "处理中")
+
 
 @mcp.tool()
 def search_knowledge(query: str, top_k: int = 8, user_id: int | None = None) -> str:
@@ -37,11 +44,13 @@ def search_knowledge(query: str, top_k: int = 8, user_id: int | None = None) -> 
     Returns:
         JSON 格式的检索结果（含来源文档、页码、相关度分数）
     """
-    from retrieval.hybrid import hybrid_search
-    result = hybrid_search(query, top_k=top_k, user_id=user_id)
+    from retrieval.retriever import retrieve
+    chunks = retrieve(user_id, query, top_k=top_k)
     return json.dumps({
-        "hits": [{**h, "content": h["content"][:600]} for h in result["hits"]],
-        "low_confidence": result["low_confidence"],
+        "hits": [{"chunk_id": c.chunk_id, "filename": c.filename, "doc_name": c.filename,
+                  "page_no": c.page_no, "chunk_type": c.chunk_type, "score": c.score,
+                  "content": c.content[:600]} for c in chunks],
+        "low_confidence": bool(chunks) and not chunks[0].reranked,
     }, ensure_ascii=False)
 
 
@@ -66,30 +75,66 @@ def ask_knowledge(query: str, user_id: int | None = None) -> str:
 
 @mcp.tool()
 def list_documents(user_id: int | None = None) -> str:
-    """列出知识库中已入库的全部文档及其状态。
+    """列出知识库中的文档及其状态（新链路：user_file + parse_tasks）。
 
     Args:
         user_id: 用户 ID（多租户过滤；不传则列出全部）
     """
-    from ingest.sync_service import list_documents as do_list
-    docs = do_list(user_id=user_id)
-    for d in docs:
-        d["created_at"] = str(d["created_at"])
+    from db import pg_store
+    sql = ("""SELECT uf.id, uf.filename, uf.file_size, uf.created_at,
+                      pt.status AS parse_status, pt.stage, pt.error,
+                      (SELECT count(*) FROM rag_chunk rc WHERE rc.file_id=uf.id) AS chunk_count
+               FROM user_file uf
+               LEFT JOIN parse_tasks pt ON pt.file_id=uf.id
+               WHERE uf.status=1""")
+    params = []
+    if user_id is not None:
+        sql += " AND uf.user_id=%s"
+        params.append(user_id)
+    sql += " ORDER BY uf.created_at DESC"
+    rows = pg_store.query(sql, tuple(params) or None)
+    docs = [{
+        "id": d["id"],
+        "filename": d["filename"],
+        "status": _parse_status(d["parse_status"]),
+        "stage": d.get("stage"),
+        "error": d.get("error"),
+        "chunk_count": d["chunk_count"],
+        "file_size": d["file_size"],
+        "created_at": str(d["created_at"]),
+    } for d in rows]
     return json.dumps(docs, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
 def document_status(doc_id: int) -> str:
-    """查询单个文档的入库状态与统计。
+    """查询单个文档的入库状态与统计（新链路：user_file + parse_tasks）。
 
     Args:
         doc_id: 文档 ID
     """
-    from ingest.sync_service import document_status as do_status
-    doc = do_status(doc_id)
-    if not doc:
+    from db import pg_store
+    row = pg_store.query_one(
+        """SELECT uf.id, uf.filename, uf.file_size, uf.created_at,
+                  pt.status AS parse_status, pt.stage, pt.progress, pt.error, pt.duration_ms,
+                  (SELECT count(*) FROM rag_chunk rc WHERE rc.file_id=uf.id) AS chunk_count
+           FROM user_file uf
+           LEFT JOIN parse_tasks pt ON pt.file_id=uf.id
+           WHERE uf.id=%s AND uf.status=1""",
+        (doc_id,))
+    if not row:
         return json.dumps({"error": f"文档 {doc_id} 不存在"}, ensure_ascii=False)
-    doc["created_at"] = str(doc["created_at"])
+    doc = {
+        "id": row["id"],
+        "filename": row["filename"],
+        "status": _parse_status(row["parse_status"]),
+        "stage": row.get("stage"),
+        "progress": row.get("progress"),
+        "error": row.get("error"),
+        "chunk_count": row["chunk_count"],
+        "file_size": row["file_size"],
+        "created_at": str(row["created_at"]),
+    }
     return json.dumps(doc, ensure_ascii=False, default=str)
 
 

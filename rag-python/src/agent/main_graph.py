@@ -60,12 +60,12 @@ def _build_context(hits: list) -> str:
 
 def _route_prior(query: str, user_id: int | None = None) -> str:
     """轻量检索先验：top1 片段（不精排），供路由参考知识库内容。
-    失败不阻塞（降级为空先验）。"""
+    失败不阻塞（降级为空先验）。新链路检索（rag_chunk）。"""
     try:
-        r = hybrid_search(query, top_k=1, use_rerank=False, user_id=user_id)
-        if r["hits"]:
-            h = r["hits"][0]
-            return f"({h['doc_name']} p.{h['page_no'] + 1}) {h['content'][:200]}"
+        chunks = rag_retrieve(user_id, query, top_k=1, use_rerank=False)
+        if chunks:
+            c = chunks[0]
+            return f"({c.filename} p.{(c.page_no or 0) + 1}) {c.content[:200]}"
         return "（无命中）"
     except Exception as e:
         logger.warning("route prior failed: %s", e)

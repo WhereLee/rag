@@ -11,7 +11,8 @@ from typing import Dict, Iterator
 from db import pg_store
 from llm.mimo_client import get_client
 from llm.prompt_loader import fill
-from retrieval.hybrid import hybrid_search
+import config
+from retrieval.retriever import retrieve
 from retrieval import semantic_cache
 from retrieval.embedder import get_embedder
 from memory import memory as memory_mod
@@ -20,6 +21,18 @@ from observability.tracing import span
 logger = logging.getLogger("rag.qa")
 
 NO_ANSWER_TEXT = "根据现有文档未找到相关信息，无法回答该问题。"
+
+
+def _search_compat(query: str, top_k: int, user_id: int | None) -> dict:
+    """新链路检索（rag_chunk）→ 旧 hybrid_search 返回格式（迁移期适配，避免下游大改）。"""
+    chunks = retrieve(user_id, query, top_k=top_k or config.FINAL_TOP_K)
+    hits = [{"chunk_id": c.chunk_id, "content": c.content, "chunk_type": c.chunk_type,
+             "page_no": c.page_no if c.page_no is not None else 0,
+             "document_id": c.file_id, "doc_name": c.filename, "score": c.score}
+            for c in chunks]
+    low_conf = bool(chunks) and not chunks[0].reranked
+    return {"hits": hits, "low_confidence": low_conf, "stage_ms": {},
+            "top_score": hits[0]["score"] if hits else None}
 
 
 def _build_context(hits: list[dict]) -> str:
@@ -103,7 +116,7 @@ def _ask_inner(query: str, session_id: str, top_k: int,
                 "cache_hit": True,
                 "total_ms": int((time.perf_counter() - start) * 1000)}
 
-    result = hybrid_search(query, top_k=top_k, user_id=user_id)
+    result = _search_compat(query, top_k, user_id)
     _log_retrieval(trace_id, query, result, user_id)
 
     hits = result["hits"]
@@ -212,7 +225,7 @@ def ask_stream(query: str, session_id: str = "", top_k: int = 0,
                 user_id=user_id, route="budget")
         return
 
-    result = hybrid_search(query, top_k=top_k, user_id=user_id)
+    result = _search_compat(query, top_k, user_id)
     _log_retrieval(trace_id, query, result, user_id)
     hits = result["hits"]
     citations = [{"index": i + 1, "chunk_id": h["chunk_id"],

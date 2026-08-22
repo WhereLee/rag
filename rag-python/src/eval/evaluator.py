@@ -21,7 +21,7 @@ from typing import Dict, List
 import config
 from db import pg_store
 from llm.mimo_client import get_client
-from retrieval.hybrid import hybrid_search
+from retrieval.retriever import retrieve
 from agent.qa_service import ask, NO_ANSWER_TEXT
 
 logger = logging.getLogger("rag.eval")
@@ -67,14 +67,6 @@ def _chunk_matches(content: str, keywords: List[str]) -> bool:
 def _chunk_any_match(content: str, keywords: List[str]) -> bool:
     """含任意证据关键词（context precision 用：相关块至少覆盖部分证据）。"""
     return any(kw in content for kw in keywords) if keywords else False
-
-
-def _load_chunk_contents(chunk_ids: list[int]) -> Dict[int, str]:
-    if not chunk_ids:
-        return {}
-    rows = pg_store.query(
-        "SELECT id, content FROM kb_chunk WHERE id = ANY(%s)", (chunk_ids,))
-    return {r["id"]: r["content"] for r in rows}
 
 
 def _judge_answer(question: str, context: str, reference: str, answer: str) -> Dict:
@@ -129,13 +121,14 @@ def run_eval(name: str = "", regression_only: bool = False,
         """处理单个问题（线程安全）。返回 {dim, scores}。"""
         dim = q["dimension"]
         keywords = (q.get("meta") or {}).get("evidence_keywords", [])
-        result = hybrid_search(q["question"], top_k=top_k,
-                               exclude_types=exclude_types,
-                               use_rerank=use_rerank,
-                               user_id=None)   # 评估场景全量访问
-        hits = result["hits"]
-        hit_ids = [h["chunk_id"] for h in hits]
-        contents = _load_chunk_contents(hit_ids)
+        # 新链路检索（rag_chunk）：retrieve 返回 RetrievedChunk 列表（含 content，无需再查库）。
+        # exclude_types：新链路检索不支持检索期排除，改为召回后过滤（语义等价，量化 VLM 块价值仍有效）。
+        chunks = retrieve(user_id=None, query=q["question"], top_k=top_k,
+                          use_rerank=use_rerank)   # user_id=None → 全量检索（评估用）
+        if exclude_types:
+            chunks = [c for c in chunks if c.chunk_type not in exclude_types]
+        hit_ids = [c.chunk_id for c in chunks]
+        contents = {c.chunk_id: c.content for c in chunks}
 
         # 检索命中：首个包含全部关键词的 chunk 排名
         hit_rank = None

@@ -61,7 +61,7 @@ def _build_snapshot(qa: dict) -> dict:
     chunks = []
     if qa.get("chunk_ids"):
         rows = pg_store.query(
-            "SELECT id, content FROM kb_chunk WHERE id = ANY(%s)", (qa["chunk_ids"],))
+            "SELECT id, content FROM rag_chunk WHERE id = ANY(%s)", (qa["chunk_ids"],))
         chunks = [{"id": r["id"], "content": r["content"][:500]} for r in rows]
     return {"query": qa["query"], "answer": qa["answer"],
             "route": qa.get("route"), "chunks": chunks}
