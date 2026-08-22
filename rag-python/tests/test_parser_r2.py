@@ -27,6 +27,13 @@ class FakeVLM:
             raise self.raise_exc
         return self.obj
 
+    def chat_text(self, prompt, png_bytes, cache_prefix):
+        """扫描页整页转录（_parse_scanned 路径）。"""
+        self.calls += 1
+        if self.raise_exc:
+            raise self.raise_exc
+        return "扫描页转录文本"
+
 
 def _ins(page, pos, text, size=11):
     """写文本：优先中文字体，回退默认字体（提取不受影响）。"""
@@ -232,12 +239,27 @@ class TestPdfParser:
         assert fake.calls == 1
         assert img.meta["bbox"], "应有坐标元数据"
 
-    def test_scanned_pdf_rejected_without_vlm(self, tmp_path):
-        """扫描型且未配置 VLM → ParseError（不静默产出乱码）。"""
+    def test_scanned_pdf_rejected_without_vlm(self, tmp_path, monkeypatch):
+        """无法创建 VLM 客户端（MIMO_API_KEY 缺失）→ ParseError（不静默产出乱码）。"""
         pdf = tmp_path / "scan.pdf"
         make_pdf(pdf, pages=5, with_image=True, with_text=False)
-        with pytest.raises(ParseError, match="扫描型"):
+
+        def _no_vlm():
+            raise ParseError("未配置 VLM（MIMO_API_KEY 缺失），无法转录扫描件/图片")
+
+        monkeypatch.setattr("ingest.parser.pdf._default_vlm", _no_vlm)
+        with pytest.raises(ParseError, match="未配置 VLM"):
             PdfParser().parse(pdf)
+
+    def test_scanned_pdf_lazy_vlm_init(self, tmp_path, monkeypatch):
+        """无参 PdfParser 扫描件 → 延迟初始化 VLM 后正常转录（pipeline 子进程路径）。"""
+        pdf = tmp_path / "scan.pdf"
+        make_pdf(pdf, pages=2, with_image=True, with_text=False)
+        fake = FakeVLM()
+        monkeypatch.setattr("ingest.parser.pdf._default_vlm", lambda: fake)
+        nodes = PdfParser().parse(pdf)
+        assert nodes, "延迟初始化后应产出转录节点"
+        assert any(n.text for n in nodes), "转录文本不应为空"
 
     def test_max_pages_rejected(self, tmp_path):
         pdf = tmp_path / "big.pdf"

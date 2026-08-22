@@ -36,8 +36,11 @@ _SENT_END = set("。！？；：”’）】》")
 
 
 def _default_vlm() -> VLMClient:
-    """默认客户端：从项目配置读取（import config 会加载 .env）。"""
+    """默认客户端：从项目配置读取（import config 会加载 .env）。
+    无 MIMO_API_KEY → ParseError（"未配置"语义 = key 缺失，而非调用方没传参）。"""
     from config import LLM_MAX_RETRIES, LLM_TIMEOUT, MIMO_API_KEY, MIMO_BASE_URL, MIMO_MODEL, PARSED_DIR
+    if not MIMO_API_KEY:
+        raise ParseError("未配置 VLM（MIMO_API_KEY 缺失），无法转录扫描件/图片")
     return VLMClient(api_key=MIMO_API_KEY, base_url=MIMO_BASE_URL, model=MIMO_MODEL,
                      timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES,
                      cache_dir=PARSED_DIR / "vlm_cache")
@@ -176,8 +179,11 @@ class PdfParser(Parser):
             avg_chars = total_chars // max(1, doc.page_count)
             # 扫描型：页均字符低于阈值 且（页上有图片块 或 完全无文字层）——纯文本短页不误判
             if avg_chars < self.page_text_threshold and (total_images > 0 or total_chars == 0):
+                # 延迟初始化：pipeline 子进程无参创建 PdfParser（vlm=None），
+                # 这里必须与 _parse_scanned/_describe_image 的惰性一致——判定抢先 raise 会把
+                # "未传客户端"当成"未配置 VLM"（扫描件永远解析失败，坑位 #50）
                 if self.vlm is None:
-                    raise ParseError(f"{path.name}: 扫描型 PDF（页均字符 {avg_chars}），未配置 VLM 无法转录")
+                    self.vlm = _default_vlm()
                 return self._parse_scanned(doc, path.name, progress_cb)  # R4：VLM 整页转录
             nodes: List[DocumentNode] = []
             for pno, page in enumerate(doc, 1):
