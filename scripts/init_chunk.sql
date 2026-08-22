@@ -22,6 +22,22 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunk_file ON rag_chunk(file_id);
 CREATE INDEX IF NOT EXISTS idx_rag_chunk_embedding
   ON rag_chunk USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL;
 
+-- 存量 rag_chunk 外键重建为 CASCADE（旧定义无级联，回收站过期清理会撞外键）
+DO $$
+DECLARE
+    fk_name text;
+BEGIN
+    SELECT conname INTO fk_name FROM pg_constraint
+    WHERE conrelid='rag_chunk'::regclass AND contype='f'
+      AND NOT pg_get_constraintdef(oid) ILIKE '%CASCADE%'
+    LIMIT 1;
+    IF fk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE rag_chunk DROP CONSTRAINT %I', fk_name);
+        ALTER TABLE rag_chunk ADD CONSTRAINT rag_chunk_file_id_fkey
+            FOREIGN KEY (file_id) REFERENCES user_file(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
 -- ========== 2. 单层目录 + 会话/文件目录绑定 ==========
 CREATE TABLE IF NOT EXISTS user_dir (
   id BIGSERIAL PRIMARY KEY,
@@ -33,6 +49,7 @@ CREATE TABLE IF NOT EXISTS user_dir (
 
 ALTER TABLE user_file ADD COLUMN IF NOT EXISTS dir_id BIGINT REFERENCES user_dir(id);
 ALTER TABLE qa_session ADD COLUMN IF NOT EXISTS dir_id BIGINT REFERENCES user_dir(id);
+CREATE INDEX IF NOT EXISTS idx_user_file_user ON user_file(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_user_file_dir ON user_file(dir_id) WHERE dir_id IS NOT NULL;
 
 -- ========== 3. 问答存档（两级复用） + 语义 HNSW ==========
@@ -115,11 +132,24 @@ CREATE TABLE IF NOT EXISTS parse_tasks (
 );
 
 -- ========== 5. user_file 同名唯一约束（存量重复先收敛：保留最早一条） ==========
+-- 注意：旧外键（parse_tasks/rag_chunk）无 CASCADE，删除重复行前必须先行清理其引用行
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'user_file_user_id_filename_key'
     ) THEN
+        DELETE FROM parse_tasks WHERE file_id IN (
+            SELECT u.id FROM user_file u
+            WHERE EXISTS (SELECT 1 FROM user_file u2
+                          WHERE u2.user_id = u.user_id AND u2.filename = u.filename
+                            AND u2.id < u.id)
+        );
+        DELETE FROM rag_chunk WHERE file_id IN (
+            SELECT u.id FROM user_file u
+            WHERE EXISTS (SELECT 1 FROM user_file u2
+                          WHERE u2.user_id = u.user_id AND u2.filename = u.filename
+                            AND u2.id < u.id)
+        );
         DELETE FROM user_file u
         WHERE EXISTS (
             SELECT 1 FROM user_file u2

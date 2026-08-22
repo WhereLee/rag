@@ -65,9 +65,7 @@ CREATE TABLE IF NOT EXISTS user_file (
     -- 同名并发双插兜底（应用层 SELECT 预检 + 唯一约束双保险）
     UNIQUE (user_id, filename)
 );
-CREATE INDEX IF NOT EXISTS idx_user_file_user ON user_file(user_id, status);
-CREATE INDEX IF NOT EXISTS idx_user_file_deleted ON user_file(user_id, status, deleted_at);
-CREATE INDEX IF NOT EXISTS idx_user_file_dir ON user_file(dir_id) WHERE dir_id IS NOT NULL;
+-- 注：idx_user_file_user / dir / deleted 索引在 init_chunk.sql 统一创建（存量库需先补列再建索引）
 
 -- 解析任务（worker 消费；file_id 主键=幂等；parsing 停留超时回收=崩溃恢复）
 CREATE TABLE IF NOT EXISTS parse_tasks (
@@ -274,7 +272,7 @@ CREATE TABLE IF NOT EXISTS issue_items (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (file_id, page_no, block_order, block_type)   -- 重复解析幂等
 );
-CREATE INDEX IF NOT EXISTS idx_issue_file ON issue_items(file_id, status);
+-- 注：idx_issue_file 索引在 init_chunk.sql 统一创建（存量库 issue_items 需先重建为 v2 再建索引）
 
 -- 块重试任务（替代图替换场景专用：job_type 恒为 block_retry）
 -- job_key 幂等键唯一约束防并发双插；lease_until 双语义（running=租约/queued=退避）
