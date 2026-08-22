@@ -21,7 +21,7 @@ jobs:
           cache: pip
           cache-dependency-path: rag-python/requirements.txt
       - name: 安装依赖（锁文件）
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: 运行测试
         run: |
           python -X utf8 -m pytest -q --no-header -p no:cacheprovider

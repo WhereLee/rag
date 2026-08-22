@@ -1,0 +1,3 @@
+# 开发/测试依赖（CI 与本地共用；运行时依赖见 requirements.txt）
+pytest==9.1.0
+pytest-asyncio==1.4.0
