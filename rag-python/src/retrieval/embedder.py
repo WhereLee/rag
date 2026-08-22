@@ -47,6 +47,10 @@ class Embedder:
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = config.EMBED_THREADS
         sess_opts.inter_op_num_threads = 1
+        if config.RERANK_ARENA_STRATEGY:
+            # 内存实验（2026-08-23）：与 rerank 同开关，kSameAsRequested = 按需扩展
+            sess_opts.add_session_config_entry("session.arena_extend_strategy",
+                                               config.RERANK_ARENA_STRATEGY)
         self._session = ort.InferenceSession(
             str(self.path / "model.onnx"), sess_options=sess_opts,
             providers=["CPUExecutionProvider"])

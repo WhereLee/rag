@@ -40,8 +40,8 @@ LLM_ENABLE_THINKING = os.getenv("LLM_ENABLE_THINKING", "1") == "1"
 # 数据库连接串：无默认值（防部署时静默使用默认密码/默认库）；缺失时启动 fail-fast
 PG_DSN = os.getenv("PG_DSN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-PG_POOL_MIN = _int("PG_POOL_MIN", 5)
-PG_POOL_MAX = _int("PG_POOL_MAX", 20)
+PG_POOL_MIN = _int("PG_POOL_MIN", 2)      # 2026-08-23：5→2（业务并发低，与 Java Hikari 5 合计 15 连接）
+PG_POOL_MAX = _int("PG_POOL_MAX", 10)     # 2026-08-23：20→10（16 并发压测会等待但不失败，业务并发≤4 无感）
 
 # --- 本地推理 ---
 EMBED_DIM = _int("EMBED_DIM", 768)
@@ -58,6 +58,9 @@ ONNX_THREADS = _int("ONNX_THREADS", 8)          # P 核绑定（i5-12500H）
 # （级联跳过率随机性影响，A/B 差距 ~8%）。结论：2 线程×信号量 2 = 4 核恰饱和，避免超订
 EMBED_THREADS = _int("EMBED_THREADS", ONNX_THREADS)
 RERANK_THREADS = _int("RERANK_THREADS", ONNX_THREADS)
+# 2026-08-23 内存实验开关：空=onnxruntime 默认 arena（预分配大块，内存高）；
+# kSameAsRequested=arena 按需扩展（内存低，性能待实测，判定标准：省≥400MB 且 p50 恶化≤10%）
+RERANK_ARENA_STRATEGY = os.getenv("RERANK_ARENA_STRATEGY", "")
 # rerank 并发推理实例数（信号量）：4 核 = 2 线程 × 2 实例恰饱和；
 # 公式：推理线程数 × 并发实例 ≈ 物理核数（CPU 共享池，CFS 调度，非独占核）
 RERANK_CONCURRENCY = _int("RERANK_CONCURRENCY", 2)
@@ -77,7 +80,7 @@ if VECTOR_COLUMN not in ("embedding", "embedding2"):
 BM25_TOP_K = _int("BM25_TOP_K", 24)
 FINAL_TOP_K = _int("FINAL_TOP_K", 8)
 RRF_K = _int("RRF_K", 60)
-RERANK_TIMEOUT = _int("RERANK_TIMEOUT", 15)     # 秒，超时降级 RRF
+RERANK_TIMEOUT = _int("RERANK_TIMEOUT", 120)    # 秒，排队硬超时（超时抛 RerankBusyError 报错，不降级；2026-08-23 定夺）
 RERANK_REJECT = float(os.getenv("RERANK_REJECT", "-5.0"))   # 低于此分 → 空结果
 RERANK_LOW = float(os.getenv("RERANK_LOW", "0.0"))          # 低于此分 → 低置信
 

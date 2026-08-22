@@ -8,13 +8,16 @@ spring:
     multipart:
       max-file-size: 50MB
       max-request-size: 50MB
+      # 2026-08-23：超 10MB 落盘临时文件（默认 0=全部进堆内存，-Xmx256m 下大文件并发上传会 OOM）
+      file-size-threshold: 10MB
   datasource:
     url: jdbc:postgresql://localhost:5432/rag_kb
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
     # 无默认值：缺失时启动失败（SecurityStartupValidator fail-fast），防部署时静默使用默认密码
     password: ${SPRING_DATASOURCE_PASSWORD:}
     hikari:
-      maximum-pool-size: 10
+      # 2026-08-23：10→5（业务并发低，Java+Python 双池合计从 30 连接降到 15，省 ~150MB）
+      maximum-pool-size: 5
 
 gateway:
   security:

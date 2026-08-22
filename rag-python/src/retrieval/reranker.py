@@ -22,7 +22,7 @@ _semaphore = threading.Semaphore(config.RERANK_CONCURRENCY)
 
 
 class RerankBusyError(RuntimeError):
-    """排队超限——上层降级为 RRF 排序。"""
+    """排队硬超时——上层报错返回（2026-08-23 定夺：不再降级 RRF）"""
 
 
 def _load():
@@ -36,6 +36,10 @@ def _load():
                 opts = ort.SessionOptions()
                 opts.intra_op_num_threads = config.RERANK_THREADS
                 opts.inter_op_num_threads = 1
+                if config.RERANK_ARENA_STRATEGY:
+                    # 内存实验（2026-08-23）：kSameAsRequested = arena 按需扩展
+                    opts.add_session_config_entry("session.arena_extend_strategy",
+                                                  config.RERANK_ARENA_STRATEGY)
                 logger.info("加载 Reranker: %s", config.RERANK_MODEL_DIR)
                 _session = ort.InferenceSession(
                     str(path / "model.onnx"), sess_options=opts,
@@ -54,7 +58,7 @@ def rerank(query: str, passages: List[str], wait_seconds: int = 0) -> List[Tuple
         return []
     timeout = wait_seconds or config.RERANK_TIMEOUT
     if not _semaphore.acquire(timeout=timeout):
-        raise RerankBusyError(f"rerank 排队超过 {timeout}s，降级 RRF")
+        raise RerankBusyError(f"rerank 排队超过 {timeout}s，系统繁忙请重试")
     try:
         session, tokenizer = _load()
         pairs = [(query, p) for p in passages]
