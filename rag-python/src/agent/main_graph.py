@@ -158,9 +158,12 @@ def _retrieve_multi(original_query: str, sub_queries: list[str],
         ordered = reranked_hits
         rerank_ok = True
     except RerankBusyError:
-        logger.warning("multi-retrieve rerank busy -> RRF order (low confidence)")
+        # 2026-08-23 定夺：排队硬超时不再降级 RRF，向上抛错
+        logger.error("multi-retrieve rerank busy（排队硬超时），向上抛错")
+        raise
     except Exception as e:
-        logger.error("multi-retrieve rerank failed -> RRF order: %s", e)
+        logger.error("multi-retrieve rerank failed: %s", e)
+        raise
     out: dict[int, dict] = {}
     for h in ordered:
         out[h["chunk_id"]] = h

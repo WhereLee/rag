@@ -51,4 +51,7 @@ def run(req: AgentRunRequest, request: Request = None):
     try:
         return run_agent(req.query, req.session_id, req.history, user_id=user_id)
     except Exception as e:
+        if "RerankBusyError" in type(e).__name__ or "排队" in str(e):
+            # 2026-08-23 定夺：rerank 排队硬超时 → 503（系统繁忙），不降级 RRF
+            raise HTTPException(503, f"检索服务繁忙，请稍后重试: {e}")
         raise HTTPException(500, f"agent 执行失败: {e}")

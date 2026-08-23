@@ -215,9 +215,10 @@ def retrieve(user_id: int, query: str, top_k: int = DEFAULT_TOP_K,
             results.append(_to_chunk(r, float(logit), reranked=True))
         return results
     except Exception as e:
-        # 模型不可用/排队超时 → 降级 RRF 原始排序（不阻塞问答链路）
-        logger.warning("rerank 降级 RRF: %s", e)
-        return [_to_chunk(r, r.get("bm25", 0.0), reranked=False) for r in fused[:top_k]]
+        # 2026-08-23 定夺：去掉"超时/故障降级 RRF"——降级质量 MRR 0.9167→0.3998 砍半，
+        # 且触发 low_conf 保守拒答，用户等 15s 拿不到答案；改为排队为主 + 硬超时报错（诚实）
+        logger.error("rerank 执行失败（不再降级 RRF，向上抛错）: %s", e)
+        raise
 
 
 def _to_chunk(r: dict, score: float, reranked: bool,
