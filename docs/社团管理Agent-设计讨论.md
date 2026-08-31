@@ -987,5 +987,60 @@
 - **修复**：application.yml 显式配 max-file-size=50MB / max-request-size=60MB / file-size-threshold=10MB（环境变量可覆盖）；浏览器实测 2MB 上传通过。
 - **复用教训**：声明“支持 X MB 上传”必须同时核对容器层（spring.servlet.multipart）与服务层校验，两者取小者生效；大文件场景必须设 file-size-threshold 落盘，否则堆内存被上传占满。
 
+---
+
+## 全量代码审查档案（2026-08-31 深夜，逐文件通读全仓）
+
+> 用户明确要求“对代码进行审查”：覆盖 Java 268 + Python 25 + 前端 31 共 324 个文件（非 git 增量，审当前工作区现状）。两路子代理逐文件通读 + 主 Agent 逐项代码实证，共 **30 项发现（P1×1 / P2×8 / P3×21）**，修复 23 项，验证 71 测全绿 + 冒烟回归通过。
+
+### 发现与处置汇总
+
+| 级别 | 发现 | 处置 |
+|---|---|---|
+| **P1** | closeRecords 事务内调 @Async generate：异步线程早于事务提交读到旧状态 RECORDING，状态门 return 且无 summary 行——活动卡死 SUMMARIZING 无法归档（归档/重试扫描均无入口，触发概率高） | ✅ afterCommit 触发（无事务上下文直接触发）+ SummaryScheduler 兜底扫描“SUMMARIZING 且无行”每 60s（K49） |
+| P2 | saveLessons 重生成/回问恢复重复插入经验条目，污染问答与 rag 源 | ✅ 插入前按 activity_id 置旧条目 VOIDED（活动维度幂等） |
+| P2 | asyncGenerateBrief 用 logExecutor 跑 LLM 长任务：池满时 CallerRunsPolicy 把毫秒级日志任务拖住 120s | ✅ 改 aiExecutor |
+| P2 | appoint/resign 多步写无事务：届数 +1 与角色变更中途失败数据不一致 | ✅ 补 @Transactional |
+| P2 | DraftMessageVO/SummaryVO 雪花 ID 裸 Long（JS 精度丢失，同域 VO 处理不一致） | ✅ 补 @JsonSerialize（K40 补漏） |
+| P2 | Python 端 psycopg 单连接无断线重连：DB 重启即服务永久瘫痪 | ✅ 两个服务改 psycopg_pool 连接池（min=1 max=4，K51） |
+| P2 | Python 内部密钥未配置仅 WARN：生产遗漏即鉴权整体旁路 | ✅ 两 config.py fail-fast（测试 setdefault 兑底）；Java ConfigValidator prod 模式强校验三密钥 + STORAGE_MODE=cos |
+| P2 | agent_draft 工具结果按“名称+LIFO”回填：同名并行调用入参与结果错配（agent_qa 已修 K47，agent_draft 未同步） | ✅ 改 tool_call_id 映射（K50） |
+| P3×4 | 登录锁定纯 username 维度可构造 DoS；resume answers 无校验；SpEL 误配置返回 500；DuplicateKey 提示不一致 | ✅ 锁定 key 加 IP；answers 条数/长度校验；SpEL 捕获转 403；报名/打分 catch 转 1060/1049 |
+| P3×3 | ConfigValidator 未校验 prod 密钥/存储；actuator/** 放行面过大；WS Origin 通配 | ✅ 见上；actuator 精确 health/info；ws.allowed-origins 配置化 |
+| P3×5 | Python：GraphRecursionError 触顶 500；summary resume 未收敛报 success；懒加载无锁；prompt 注入面 | ✅ 捕获降级；st.next 返回 awaiting；双检锁；system prompt 加“数据与指令分离”声明 |
+| P3×7 | 前端：localStorage 损坏白屏；4xx/5xx 统一“网络异常”；multipart 显式头；ws:// 硬编码；unhandled rejection；问答竞态；awaiting 仍显示重生成 | ✅ safeParse×2；响应体 message 复用；删 Content-Type；协议派生；补 catch×3；msgSeq 序号；按钮条件收紧 |
+| ⏸ | checkpoint 无限增长（agent_qa 无清理）；资料列表 N+1；总结入库并发单飞 | 待处理表（前两项已在案；checkpoint 清理与概念侧 cleanupExpiredCheckpoints 对齐时一并做） |
+
+### 验证证据
+
+| 项 | 结果 |
+|---|---|
+| Java mvn test | 71/71（P1 修复后 ActivityServiceImplTest 4 用例回归通过） |
+| python pytest | 8/8（fail-fast 后测试 setdefault 兑底生效） |
+| frontend build | 通过（5.5s） |
+| 服务重启 | Java 8093 + agent_draft 8094 + agent_qa 8095（连接池/fail-fast 就绪日志确认）+ vite 5174 + Redis（机器重启后服务停止，已恢复） |
+| 浏览器冒烟 | 登录/社团详情/活动详情（总结卡片）/问答竞态（S1↔S2 快速切换旧响应丢弃、消息与高亮一致）全过，0 报错 |
+
+### 全量审查新坑位（K49、K50、K51）
+
+#### K49. 【已踩】@Transactional 内调 @Async：异步线程读旧快照，状态机卡死且无行可扫（2026-08-31 深夜）
+- **现象**：closeRecords（事务内 CAS 置 SUMMARIZING）随后调 @Async generate——池空闲时异步线程立即执行，早于事务提交读到 RECORDING，状态门 return，活动卡死 SUMMARIZING 且无 summary 行；归档前置检查过不了，失败重试只扫 FAILED 行，无任何恢复通道。
+- **原因**：事务内提交异步任务存在“提交时序”竞态；且“失败行”兕底机制依赖行存在，无行场景是盲区。
+- **修复**：afterCommit 回调触发（事务提交后再提交异步任务）+ 调度器补扫“SUMMARIZING 且无 summary 行”每 60s；无事务上下文（单测）直接触发。
+- **复用教训**：@Transactional 与 @Async 同链使用时必须显式决策触发时机；任何“失败兕底”机制都要问一句：失败时如果连行都没有，谁来扫？
+
+#### K50. 【已踩】同类修复只做了一半：agent_qa 改了 tool_call_id，agent_draft 漏同步（2026-08-31 深夜）
+- **现象**：全量审查发现 agent_draft 工具结果回填仍用“名称+LIFO”，同名并行调用时入参与结果错配（与 agent_qa 修复前完全相同的 bug）。
+- **原因**：K47 修复时只改了问答服务（当时审查范围），起草服务是同类实现但未在视野内；跨文件同构代码的修复没有“grep 同模式扩散”动作。
+- **修复**：agent_draft 同步改为 tool_call_id 映射。
+- **复用教训**：修一个 bug 后，用 grep 把同模式代码全部找出来逐个核对（“修复扩散检查”）；两个服务同构实现时，一处的修复必须同步另一处。
+
+#### K51. 【已踩】Python 进程级单数据库连接：DB 重启即服务永久瘫痪（2026-08-31 深夜）
+- **现象**：agent_draft/agent_qa 的 get_saver 懒加载单例持有单条 psycopg 连接，Postgres 重启/网络闪断后连接不可自愈，所有对话/问答/总结请求永久失败，只能重启进程。
+- **原因**：单连接设计把“连接生命周期”绑定到进程生命周期，缺少重连机制。
+- **修复**：改 psycopg_pool 连接池（min=1 max=4，断线自动重建；langgraph-checkpoint-postgres 原生支持 pool），get_saver 加双检锁。
+- **复用教训**：常驻服务的数据库连接必须走连接池或带重连探测；单连接“看似简单”但把基础设施故障变成了不可自愈的进程故障。
+
+
 
 
