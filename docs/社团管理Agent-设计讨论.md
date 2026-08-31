@@ -956,4 +956,36 @@
 | 资料列表懒同步 N+1 | list() 对每条 parsing 记录同步调 rag queryParseStatus（30s 超时/条），全员可触发 | 下次碰文件库时加节流（如 30s 内跳过）或异步化 |
 | 总结入库并发单飞 | 归档后立即重生成/调度重复触发时两个 doSync 并发可产生活跃孤儿文件（低概率） | 与 rag 幂等替换策略一起设计时处理 |
 
+---
+
+## 独立复查档案（2026-08-31 夜，全新视角不依赖既有结论）
+
+> 用户要求“再来查一次，不要依赖之前的经验”。以 CodeReview 全量重审（origin/master..master 15 提交，115 文件）+ 逐项代码实证 + 运行时/浏览器验证的方式重走全链路，**未复用任何上轮结论**。新发现 4 项（上轮均未捕获），全部修复并验证。
+
+### 新发现与处置
+
+| 级别 | 发现（上轮盲区） | 处置 |
+|---|---|---|
+| P2 | **multipart 默认 1MB 截断**：Spring 默认 max-file-size=1MB，multipart 解析在 Controller 之前——资料库声称 50MB、头像 5MB 全被默认值截断（必现功能缺陷） | ✅ application.yml 显式配置 50MB/60MB，另配 file-size-threshold=10MB（>10MB 落盘防并发上传撑爆堆，K48） |
+| P2 | **rag 同步无补偿**：syncToRag 失败后只有手动重生成一条恢复通道，success+rag_file_id 为空的已归档总结无人接管（对比总结生成有 SummaryScheduler 重试闭环） | ✅ SummaryScheduler 新增 ragSyncRetry（每 5 分钟扫 success+空 ragFileId+已归档重推，单条失败不影响其余）+ 3 个单测 |
+| P3 | **问答会话并发**：同会话多端同时提问并发写同一 PostgresSaver thread，上下文互相覆盖 | ✅ QaServiceImpl.chat 加 Redis 会话锁（SETNX 30s，锁占用时拒绝“正在回答中”）+ 锁冲突单测 |
+| P3 | **RepeatSubmitAspect 异常覆盖**：失败路径 redisTemplate.delete 在 Redis 恰好故障时替换原始业务异常 | ✅ delete 包 try-catch 忽略删除失败 |
+| P3 | Python 内部 secret 未配置不 fail-fast（仅 WARN），依赖部署纪律 | ⏸ 记录：与 Java fail-fast 对齐需引入环境开关，部署手册已写明必注入 |
+| P3 | 资料列表懒同步 N+1 | ⏸ 已在待处理表，未重复 |
+
+### 验收证据（独立复查）
+
+| 项 | 结果 |
+|---|---|
+| club Java mvn test | 71/71（新增 SummarySchedulerTest 3 + Qa 锁用例 1） |
+| 运行时 | 日志仅 1 条 HikariPool 时钟跳跃 WARN（机器休眠所致）；Redis ping OK |
+| 浏览器实测 | ① 2MB PDF 上传成功（修复前必被 1MB 拒），解析中状态正确，软删清理通过 ② 老师管理台三入口（社团/待办/日志）全正常，操作/登录日志有数据 ③ 概念发起入口业务态正确（存在起草中概念时 disabled，继续编辑可开）④ 全程 0 JS 报错 |
+
+#### K48. 【已踩】Spring multipart 默认 1MB 静默截断业务声明上限（2026-08-31 夜）
+- **现象**：资料库服务层校验 50MB、头像 5MB，但实际上传 >1MB 的文件在进 Controller 前就被 Spring 拒绝（MaxUploadSizeExceededException），服务层校验形同虚设；且默认 file-size-threshold=0 意味着大文件全量进堆，并发上传有 OOM 风险。
+- **原因**：业务上限只写在服务层校验，漏了 Spring Boot 容器层默认值（max-file-size=1MB）与内存阈值（threshold=0 全进堆）。
+- **修复**：application.yml 显式配 max-file-size=50MB / max-request-size=60MB / file-size-threshold=10MB（环境变量可覆盖）；浏览器实测 2MB 上传通过。
+- **复用教训**：声明“支持 X MB 上传”必须同时核对容器层（spring.servlet.multipart）与服务层校验，两者取小者生效；大文件场景必须设 file-size-threshold 落盘，否则堆内存被上传占满。
+
+
 
