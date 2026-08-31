@@ -806,7 +806,7 @@
 | 测试缺口 | AuthServiceImpl（验证码/锁定/黑名单）、MembershipServiceImpl（换届/任命/离职）、RecordServiceImpl、SurveyServiceImpl 等核心 Service 无单测 | RAG 阶段讨论后补（优先 Auth + Membership） |
 | 每请求查库 | JwtAuthenticationFilter 每请求 loadUserByUsername → selectOne(sys_user) | 用户量增长前优化（Redis 缓存用户或 claims 快照 + 变更失效） |
 | 登录锁定 DoS | 失败锁定按用户名维度，多 IP 分布式可对单账号制造锁定 | 已有验证码+IP 限流缓解；如上线后有真实爆破信号再加 IP+用户双维度锁定 |
-| 双项目集成后续 | rag 侧 org 空间暂无独立评估集持久化（评估后物理清理）；/ai/knowledge 未做结果缓存；活动资料无批量上传 | 阶段 2（复盘文件入库 / 管理层问答服务）时按需补齐 |
+| 双项目集成后续 | 阶段 2 已完成（总结报告入库/评估集持久化/问答服务/缓存/批量上传）；剩余：问答服务成员/访客权限分级（内容分级未设计）；问答 checkpoint 无 TTL 清理 | 阶段 3（成员/访客问答入口）时按需补齐 |
 
 ---
 
@@ -844,5 +844,58 @@
 
 ### 遗留说明
 
-- 两个仓库（rag / club-agent）的本次改动**均未提交**，提交时机由用户决定。
-- 阶段 2 方向（方案已留口）：复盘报告文件入库、管理层专用问答服务（独立 Agent）、评估集持久化。
+- **已归档新仓库**（2026-08-31 用户拍板）：本地 rag（含 org 集成层）整体提交至 `WhereLee/club-rag.git`（master + cloud-deploy），原 `WhereLee/rag.git` 保持原样；本地目录重整为 `工作区根/rag/` 与 `club-agent/` 平行。
+- 阶段 2 已完成，见下方实施档案。
+
+---
+
+## 双项目集成阶段 2 实施档案（2026-08-31）
+
+> 目标：把"沉淀 → 复用"闭环的后半段接通：总结报告自动入库、评估集固化、管理层直接问答。
+> 闭环补全：活动归档 → 总结报告自动推 rag → 双源知识可检索 → 管理层问答服务直接消费 + 概念 Agent 起草消费。
+
+### 实施内容
+
+**J1 总结报告自动入 rag**
+- `activity_summary` 加 `rag_file_id` 列；归档成功（人确认后）异步推报告入 rag（渲染检索友好 Markdown：基本信息 + 指标平铺 + 正文 + 沉淀经验）
+- 归档后重生成成功 → 软删旧文件重推新文件（幂等替换）；失败仅告警不阻断归档主流程；`RagClientFactory` 新增 `ingestBytes` 字节流重载（程序生成文件）
+- 活验证 7/7：真实归档 → rag_file_id 回填 → 解析 success → 检索命中（《活动总结-*.md》）
+
+**J2 评估集固化**
+- 种子（5 份）与题目（15 题）固化到 `club-agent/eval/`；脚本读固化数据，幂等（已入库跳过）、默认保留、`--cleanup` 可选清理；Recall@8=1.0、MRR=1.0
+
+**J3 管理层经验问答（独立 Agent 服务，备用设计落地）**
+- Python `agent_qa` 服务（8095）：create_agent + PostgresSaver，单工具 search_knowledge（经 Java /ai/knowledge 双源，不做联网兑底——问答求"有据"）；会话键 = qa_session_id，与起草服务共 checkpoint 表按 thread 隔离；温度 0.3 求稳；X-Internal-Secret 内部密钥 + JWT 透传（鉴权链完整）
+- Java：`qa_session`/`qa_message` 表（会话私有 + 软删；三方消息留痕，事实源在业务表）；会话 CRUD + 问答端点（@ClubPermission activity:manage 仅管理层）；首问自动命名；`QaPythonClientFactory` 独立配置块（qa.*）
+- 前端：独立"经验问答"页（会话列表 + 对话区 + 检索过程折叠溯源），社团详情页管理层入口按钮；雪花 id 一律 ToStringSerializer（K40 预防）
+- 活验证 11/11 + 浏览器实测：回答命中评估种子并标注来源《eval_icebreaker_plan.md》、一轮双检索、自动命名、软删闭环均通过；顺手修复目录重整导致的 agent_draft/eval 脚本 .env 路径回归（K44）
+
+**J4 两个小项**
+- `/ai/knowledge` Redis 短 TTL 缓存（300s，key=club+topK+md5(query)）：只缓存非降级态结果（故障窗口不固化），Redis 故障穿透不阻断（K20）
+- 活动资料批量上传：multiple + 串行队列（单失败不阻断后续，全部完成后统一刷新）
+
+### 验收证据（阶段 2）
+
+| 项 | 结果 |
+|---|---|
+| club Java `mvn clean test` | 62/62 通过（新增 SummaryRagSync 4 + QaService 4 用例） |
+| club python pytest | 8/8 通过 |
+| frontend build | 通过 |
+| 检索评估（固化集） | Recall@8=1.0、MRR=1.0，幂等重跑验证通过 |
+| J1 活验证 | 7/7（归档→回填→解析→检索命中） |
+| J3 活验证 | 11/11（会话/问答/溯源/命名/重放/软删） |
+| 浏览器实测 | 问答页全功能通过（截图因浏览器视口隐藏未留存，DOM 快照为证） |
+
+### 阶段 2 新增坑位（K43、K44）
+
+#### K43. 【已踩】psycopg3 客户端绑定下 LIKE 通配符被当占位符（2026-08-31）
+- **现象**：SQL 内联 `LIKE 'eval\_%'` 报 `only '%s', '%b', '%t' are allowed as placeholders, got '%'`。
+- **原因**：psycopg3 默认客户端绑定，对整个语句扫描 `%` 占位符，LIKE 的 `%` 与转义反斜杠被误判。
+- **修复**：LIKE 模式改为参数传入（`LIKE %s` + 参数 `"eval\\_%"`）。
+- **复用教训**：psycopg3 中一切 `%`（含 LIKE/正则）要么参数化要么 `%%` 转义，不要内联。
+#### K44. 【已踩】目录重整击穿相对路径假设：.env 静默失效（2026-08-31）
+- **现象**：rag 项目从工作区根移入 `rag/` 子目录后，agent_draft 的 `RAG_ENV = parent/".env"`、eval 脚本的 `parents[2]` 全部指向不存在的旧路径；无报错，密钥静默丢失。
+- **原因**：多处代码用"相对层级数"推导兄弟项目路径，目录结构一变全部失效，且 load_dotenv 对不存在文件不报错。
+- **修复**：逐个改为新布局路径（`parent/"rag"/".env"`、`parents[2]/"rag"`）。
+- **复用教训**：移动/重组项目目录后，必须 grep `parents\[`、`\.env`、`\.\./` 等路径假设逐个核对；跨项目引用的路径推导优先用显式环境变量而非层级数硬编码。
+
