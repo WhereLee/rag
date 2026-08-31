@@ -1009,7 +1009,7 @@
 | P3×3 | ConfigValidator 未校验 prod 密钥/存储；actuator/** 放行面过大；WS Origin 通配 | ✅ 见上；actuator 精确 health/info；ws.allowed-origins 配置化 |
 | P3×5 | Python：GraphRecursionError 触顶 500；summary resume 未收敛报 success；懒加载无锁；prompt 注入面 | ✅ 捕获降级；st.next 返回 awaiting；双检锁；system prompt 加“数据与指令分离”声明 |
 | P3×7 | 前端：localStorage 损坏白屏；4xx/5xx 统一“网络异常”；multipart 显式头；ws:// 硬编码；unhandled rejection；问答竞态；awaiting 仍显示重生成 | ✅ safeParse×2；响应体 message 复用；删 Content-Type；协议派生；补 catch×3；msgSeq 序号；按钮条件收紧 |
-| ⏸ | checkpoint 无限增长（agent_qa 无清理）；资料列表 N+1；总结入库并发单飞 | 待处理表（前两项已在案；checkpoint 清理与概念侧 cleanupExpiredCheckpoints 对齐时一并做） |
+| ⏸ | checkpoint 无限增长（agent_qa 无清理）；资料列表 N+1；总结入库并发单飞 | ✅ 全部修复（见下方“待处理勾销档案”，Java 78/78） |
 
 ### 验证证据
 
@@ -1035,11 +1035,41 @@
 - **修复**：agent_draft 同步改为 tool_call_id 映射。
 - **复用教训**：修一个 bug 后，用 grep 把同模式代码全部找出来逐个核对（“修复扩散检查”）；两个服务同构实现时，一处的修复必须同步另一处。
 
+### 待处理勾销档案（2026-08-31 深夜，用户追问后补齐 3 项）
+
+> 全量审查待处理表 3 项在用户追问时全部落地：agent_qa checkpoint TTL 清理（对齐概念侧）、资料列表懒同步 N+1 节流、总结入库并发单飞锁。新增 7 个回归用例（Java 71→78）。
+
+| 项 | 修复方案 | 验证 |
+|---|---|---|
+| **agent_qa checkpoint 无限增长** | QaSessionMapper 加 3 条清理 SQL（对齐 ConceptSessionMapper：thread_id 取自软删会话、updated_at 超 ttl 天）；新建 QaCheckpointScheduler 每天 03:30 执行（配置 `qa.checkpoint-ttl-days`，默认 30 天）；软删即终态——用户不再续聊，checkpoint 可清 | QaCheckpointSchedulerTest 2 用例（三表调用 / 0 行静默） |
+| **资料列表懒同步 N+1** | Redis `setIfAbsent` 节流：parsing 记录 30s 窗口内最多查一次 rag queryParseStatus（key `club:filelib:sync:{libId}`，TTL 30s）；失败不置 key 下窗口重试；非 parsing 不碰 Redis | ActivityFileLibServiceImplTest 3 用例（节流命中不查 / 正常回填 / 非 parsing 跳过） |
+| **总结入库并发单飞** | Redis 锁 `club:summary:rag-sync:{activityId}`（TTL 5 分钟防进程崩溃锁残留）：拿到才执行 doSync，拿不到说明他处入库进行中直接跳过；finally 释放（删除失败由 TTL 兑底）；锁冲突时两个 doSync 不再互相软删对方刚推的文件 | SummaryRagSyncServiceImplTest +2（锁冲突跳过 / 正常路径释放） |
+
+### 全量审查新坑位（K49、K50、K51）
+
 #### K51. 【已踩】Python 进程级单数据库连接：DB 重启即服务永久瘫痪（2026-08-31 深夜）
 - **现象**：agent_draft/agent_qa 的 get_saver 懒加载单例持有单条 psycopg 连接，Postgres 重启/网络闪断后连接不可自愈，所有对话/问答/总结请求永久失败，只能重启进程。
 - **原因**：单连接设计把“连接生命周期”绑定到进程生命周期，缺少重连机制。
 - **修复**：改 psycopg_pool 连接池（min=1 max=4，断线自动重建；langgraph-checkpoint-postgres 原生支持 pool），get_saver 加双检锁。
 - **复用教训**：常驻服务的数据库连接必须走连接池或带重连探测；单连接“看似简单”但把基础设施故障变成了不可自愈的进程故障。
+
+#### K52. 【已踩】跨功能“同构缺陷”扩散：A1 checkpoint 清理只做了概念侧，问答侧同款表一直无人接管（2026-08-31 深夜）
+- **现象**：概念起草的 checkpoint TTL 清理（A1，每天 03:30 清三表）早已上线，agent_qa 的 PostgresSaver 同样无限增长却无清理任务——同构问题一侧修了另一侧漏了。
+- **原因**：A1 实现时只盯“概念会话”，未 grep “还有哪些表/服务用 PostgresSaver 存 checkpoint”；全量审查待处理表记了这条但直到用户追问才落地。
+- **修复**：QaSessionMapper 加同构 3 条清理 SQL（软删会话 + TTL）+ QaCheckpointScheduler（每天 03:30，`qa.checkpoint-ttl-days` 配置）。
+- **复用教训**：“按实体建清理/过期任务”时先 grep 同构实体（同表结构的兄弟表、同模式的兄弟服务）；待处理表条目要带“触发条件”（碰什么模块时做），不能只有主题词。
+
+#### K53. 【已踩】列表页“每行同步一次外部状态”的 N+1：业务正确但量级失控（2026-08-31 深夜）
+- **现象**：资料库列表对每条 parsing 记录同步调 rag queryParseStatus（readTimeout 30s/条），全员可高频触发——文件一多列表接口被外部调用拖到秒级。
+- **原因**：懒同步设计只考虑“状态要回填”，没给“回填频率”上限；同步外部状态是典型可节流操作（状态本身是最终一致的）。
+- **修复**：Redis setIfAbsent + 30s TTL 节流，窗口内重复访问直接跳过；失败不置 key 保证可重试。
+- **复用教训**：任何“读路径里同步调外部服务”都要问频率上限：要么节流（最终一致可接受），要么异步回填；列表页禁止逐行同步外部状态。
+
+#### K54. 【已踩】同类异步任务无互斥：重生成与调度补偿并发互相软删对方文件（2026-08-31 深夜）
+- **现象**：总结报告入 rag 的触发点有三个（归档、重生成、5 分钟调度补偿），并发时两个 doSync 都先“软删旧文件”再推新文件——后完成的把自己的文件标成无效、先完成的文件成了活跃孤儿，两个都查不到。
+- **原因**：异步任务只防了“提交侧”异常，没防“执行侧”并发；幂等替换语义（软删+重推）本身不是原子的。
+- **修复**：Redis 分布式锁（setIfAbsent + TTL 5 分钟 + finally 释放）单飞，拿不到锁直接跳过（他处正在入库）。
+- **复用教训**：多触发点的同一异步任务必须显式互斥；幂等方案由“非原子多步”组成时，并发窗口就是孤儿窗口。锁 TTL 要覆盖任务最长执行时间并容忍进程崩溃（过期自动释放）。
 
 
 
