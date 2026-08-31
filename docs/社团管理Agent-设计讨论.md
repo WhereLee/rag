@@ -897,5 +897,63 @@
 - **现象**：rag 项目从工作区根移入 `rag/` 子目录后，agent_draft 的 `RAG_ENV = parent/".env"`、eval 脚本的 `parents[2]` 全部指向不存在的旧路径；无报错，密钥静默丢失。
 - **原因**：多处代码用"相对层级数"推导兄弟项目路径，目录结构一变全部失效，且 load_dotenv 对不存在文件不报错。
 - **修复**：逐个改为新布局路径（`parent/"rag"/".env"`、`parents[2]/"rag"`）。
-- **复用教训**：移动/重组项目目录后，必须 grep `parents\[`、`\.env`、`\.\./` 等路径假设逐个核对；跨项目引用的路径推导优先用显式环境变量而非层级数硬编码。
+- **复用教训**：移动/重组项目目录后，必须 grep `parents\[`、`\.env`、`\.\.\/` 等路径假设逐个核对；跨项目引用的路径推导优先用显式环境变量而非层级数硬编码。
+
+---
+
+## 全链路验收与代码审查修复档案（2026-08-31 二轮）
+
+> 阶段 2 交付后的整体验收：环境盘点 → CodeReview 全量审查 → 逐项验证 → 修复 → 回归测试 → 服务重启 → 浏览器实测。审查对象为未推送提交 96162d8（阶段 1+2 全部）。
+
+### 审查发现与处置（CodeReview 7 项，逐项代码实证后处置 6 项）
+
+| 级别 | 发现 | 处置 |
+|---|---|---|
+| P1 | 知识缓存 key 缺 userId：thinking_pattern 按人隔离，同社团 B 用户命中 A 的缓存 → 串读越权 + 检索错乱 | ✅ 修复：cacheKey 加 userId 维度（K46） |
+| P1 | syncToRag 三处调用点无兕底：@Async(aiExecutor) AbortPolicy 池满时提交异常在调用方线程抛出 → 归档事务回滚 / 已 SUCCESS 总结被外层 catch 误置 FAILED | ✅ 修复：三处调用点包 try-catch 仅告警（K45） |
+| P2 | 问答会话 title 无长度校验，超 100 字符直接 DB 异常 500 | ✅ 修复：Service 层截断 100 |
+| P2 | agent_qa graph.py tool_args 位置匹配错位：stream_mode="updates" 下 AI 消息先于 tool 消息到达，tools[-1] 永远指上一轮记录 → 审计入参错位/丢失 | ✅ 修复：改用 tool_call_id 映射回查（K47） |
+| P2 | qa/draft internal-secret 在 yml 层兑底弱默认值（dev-internal-secret-2026），架空 Factory 的未配置告警机制（rag 侧是空默认+告警，三服务两种模式不一致） | ✅ 修复：两处 yml 默认值改空，对齐 rag 基线（.env 已有实际值，本地不受影响） |
+| P3 | 总结软删/回填一致性窗口：软删旧文件后 ingest 失败 → ragFileId 指向已软删文件且无自愈标记；并发触发可产生活跃孤儿文件 | ✅ 轻量修：ingest 失败置空 ragFileId（下次触发全新推送自愈）；并发单飞记待处理 |
+| P3 | 资料列表懒同步对 rag 的 N+1 外部调用（每条 parsing 记录同步调 queryParseStatus，readTimeout 30s/条，全员可触发） | ⏸ 记待处理表（节流/异步策略需拍板） |
+
+已核验无问题方向：QaController 5 端点权限双层校验、SQL 全参数化、JWT 透传链、跨服务超时梯度（5s/30s/120s）、RestClient DCL、缓存降级边界语义本身。
+
+### 验收证据（二轮）
+
+| 项 | 结果 |
+|---|---|
+| club Java mvn test | 67/67（62 + 新增回归 5：KnowledgeServiceImplTest 2 / SummaryServiceImpl P1 回归 1 / SummaryRagSync 自愈 1 / Qa title 截断 1） |
+| club python pytest | 8/8 |
+| frontend build | 通过 |
+| 服务重启 | Java 8093（.env 注入 + spring-boot:run）、agent_qa 8095 重启后健康 200 |
+| 浏览器实测 | 登录→篮球社→经验问答→提问破冰经验：回答引用《eval_icebreaker_plan.md》+ 2 张检索卡片 + 自动命名 + 会话持久化，全过；toolArgs 修复链路（graph.py→落库→API→前端展示）复验通过 |
+
+### 二轮新增坑位（K45、K46、K47）
+
+#### K45. 【已踩】@Async(AbortPolicy) 提交异常穿透调用方：@Transactional 主流程被回滚（2026-08-31）
+- **现象**：CodeReview 发现 syncToRag（@Async("aiExecutor")）三处调用点无兕底；池满时 TaskRejectedException 在调用方线程抛出——归档事务（@Transactional）整体回滚、已 SUCCESS 的总结被外层 catch 误置 FAILED 触发无谓重试。
+- **原因**：C3 修复时只给了"总结生成"提交被拒落 failed 行的兕底，J1 新增的 rag 同步调用点漏了同一防线；@Async 的提交异常发生在代理层之前，方法体内的 try-catch 管不住。
+- **修复**：三个调用点各自包 try-catch 仅告警（与"尽力而为"语义一致）。
+- **复用教训**：给线程池配 AbortPolicy 的同时，必须盘点**全部**提交点是否都有拒绝兕底（新增调用点不会自动继承）；@Async 方法的异常防护要分两层——提交时（调用方线程）与执行时（异步线程）。
+
+#### K46. 【已踩】缓存 key 维度未覆盖数据隔离维度：按人隔离数据进共享缓存（2026-08-31）
+- **现象**：/ai/knowledge 缓存 key=club+topK+md5(q)，但源 A 结果含 thinking_pattern（owner_id 隔离）；同社团 B 用户命中 A 的缓存 → 越权读到 A 的专属经验，自己的反而不可见。
+- **原因**：缓存设计时只按"查询语义"（club/query/topK）建 key，漏看结果集里还有"按人隔离"的成分；隔离规则藏在 SQL 里，key 设计者看不到。
+- **修复**：cacheKey 加 userId；补单测锁定（同问句不同用户 key 不同）。
+- **复用教训**：缓存 key 的维度集合必须 ⊇ 结果集的所有隔离维度（club/人/角色/语言等）；数据隔离规则写在 SQL/Service 里时，缓存层极易漏看——设计缓存时先枚举结果的可见性边界。
+
+#### K47. 【已踩】LangGraph stream_mode="updates" 消息顺序：AI 先于同轮 tool，位置回填必错位（2026-08-31）
+- **现象**：agent_qa 落库的 tool 消息 tool_args 恒为空或错位到上一轮同名记录（首尾两轮恒空）。
+- **原因**：updates 模式下 AI 消息（带 tool_calls）与 tool 消息分属两个 chunk 且 AI 在前；用 tools[-1] 位置匹配补 args 时，处理 AI 消息时本轮 tool 消息尚未 append，实际改到的是上一轮记录。
+- **修复**：AI 消息处理时按 tool_call_id 建 {id: args} 映射，tool 消息到达时按 msg.tool_call_id 回查；浏览器实测复验入参展示正确。
+- **复用教训**：流式消息回填跨 chunk 的关联数据，一律用消息自带 ID 关联，不用位置（顺序/下标）推断；设计工具调用审计链路时先确认框架的 chunk 产出顺序。
+
+### 待处理表补充（二轮新增）
+
+| 项 | 现状 | 处理时机 |
+|---|---|---|
+| 资料列表懒同步 N+1 | list() 对每条 parsing 记录同步调 rag queryParseStatus（30s 超时/条），全员可触发 | 下次碰文件库时加节流（如 30s 内跳过）或异步化 |
+| 总结入库并发单飞 | 归档后立即重生成/调度重复触发时两个 doSync 并发可产生活跃孤儿文件（低概率） | 与 rag 幂等替换策略一起设计时处理 |
+
 
