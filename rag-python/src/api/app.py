@@ -178,6 +178,7 @@ from api.agent_api import router as agent_router  # noqa: E402
 from api.feedback_api import router as feedback_router  # noqa: E402
 from api.prompt_api import router as prompt_router  # noqa: E402
 from api.diagnosis_api import router as diagnosis_router  # noqa: E402
+from api.org_api import router as org_router  # noqa: E402
 from observability.tracing import setup_tracing  # noqa: E402
 app.include_router(ingest_router, prefix="/api/ingest")
 app.include_router(eval_router, prefix="/api/eval")
@@ -185,5 +186,6 @@ app.include_router(agent_router, prefix="/api/agent")
 app.include_router(feedback_router, prefix="/api/feedback")
 app.include_router(prompt_router, prefix="/api/admin")
 app.include_router(diagnosis_router, prefix="/api/diagnosis")
+app.include_router(org_router, prefix="/api/org")
 
 setup_tracing()

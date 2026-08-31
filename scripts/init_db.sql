@@ -51,15 +51,19 @@ CREATE TABLE IF NOT EXISTS file_blob (
 );
 
 -- 用户文件（私人文件管理：上传/列表/删除/回收站/下载；blob 秒传去重）
+-- org 知识空间（双项目集成）：owner_type='org' 时文件归属社团（org_id=社团ID），
+-- user_id 为 NULL（不属于个人）；检索隔离见 retriever._scope_filter
 CREATE TABLE IF NOT EXISTS user_file (
     id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES kb_user(id),
+    user_id BIGINT REFERENCES kb_user(id),    -- 可空：org 文件（owner_type='org'）无个人归属
     blob_id BIGINT REFERENCES file_blob(id),
     filename VARCHAR(255) NOT NULL,           -- 原始文件名（展示用）
     file_size BIGINT NOT NULL DEFAULT 0,
     content_type VARCHAR(100) DEFAULT '',
     status SMALLINT DEFAULT 1,                -- 1正常 0已删除
     dir_id BIGINT REFERENCES user_dir(id),
+    owner_type VARCHAR(10) NOT NULL DEFAULT 'personal',  -- personal=个人 / org=组织（社团）
+    org_id BIGINT,                            -- owner_type='org' 时的社团 ID（个人文件为 NULL）
     deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
     -- 同名并发双插兜底：部分唯一索引（仅活跃行唯一，软删行不占命名空间）
@@ -67,7 +71,7 @@ CREATE TABLE IF NOT EXISTS user_file (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_file_active_name
     ON user_file(user_id, filename) WHERE status = 1;
--- 注：idx_user_file_user / dir / deleted 索引在 init_chunk.sql 统一创建（存量库需先补列再建索引）
+-- 注：idx_user_file_user / dir / deleted / idx_user_file_org 索引在 init_chunk.sql 统一创建（存量库需先补列再建索引）
 
 -- 解析任务（worker 消费；file_id 主键=幂等；parsing 停留超时回收=崩溃恢复）
 CREATE TABLE IF NOT EXISTS parse_tasks (

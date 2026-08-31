@@ -229,3 +229,14 @@ END $$;
 -- ========== 9. 遗留列清理 ==========
 ALTER TABLE kb_user DROP COLUMN IF EXISTS salt;              -- BCrypt 自带盐
 ALTER TABLE memory_entry DROP COLUMN IF EXISTS user_id_old;  -- 迁移残留
+
+-- ========== 10. org 知识空间（双项目集成：个人知识库 → 组织知识库） ==========
+-- 背景：club 项目将活动文件推入 rag 知识库，按社团（org_id）隔离。
+-- 兼容保证：存量行全部默认 owner_type='personal'，个人检索路径行为不变；
+-- user_id 放开 NOT NULL（org 文件无个人归属；存量行均有值，不受影响）。
+ALTER TABLE user_file ADD COLUMN IF NOT EXISTS owner_type VARCHAR(10) NOT NULL DEFAULT 'personal';
+ALTER TABLE user_file ADD COLUMN IF NOT EXISTS org_id BIGINT;
+ALTER TABLE user_file ALTER COLUMN user_id DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_user_file_org
+    ON user_file(org_id) WHERE owner_type='org' AND status=1;
+

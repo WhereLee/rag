@@ -1,8 +1,10 @@
 """混合检索（新链路 rag_chunk）：向量召回 + BM25 召回 → RRF 融合 → rerank 精排。
 
 设计（对应 C3 计划，调研结论落地）：
-- 权限/软删过滤：JOIN user_file WHERE user_id=? AND status=1——块表不物理删，查询期过滤
+- 权限/软删过滤：JOIN user_file WHERE status=1 + 隔离空间过滤——块表不物理删，查询期过滤
   （规避 HNSW 高频删除 tombstone/碎片问题，软删文件永不可见）
+- 隔离空间（双项目集成）：personal（个人，user_id）与 org（组织/社团，org_id）互斥，
+  一次检索只走一个空间（见 _scope_filter）；个人路径行为与旧版一致
 - BM25：jieba 分词 + rank_bm25（k1=1.5, b=0.75），文档文本 = heading_path + content
   （标题词参与精确匹配，调研实践：对标题加权提升专有名词召回）
 - RRF k=60（Cormack 2009 经验值）：排名倒数融合，绕开向量分 [-1,1] 与 BM25 分无界的尺度不可比
@@ -60,23 +62,40 @@ class RetrievedChunk:
     rerank_skipped: bool = False  # True = 级联主动跳过（双通道共识，高置信而非降级）
 
 
-def _vector_search(user_id: int, query: str, top_n: int = VECTOR_TOP_N,
-                   dir_id: Optional[int] = None) -> List[dict]:
-    """向量召回：HNSW 余弦近邻，用户+软删过滤；dir_id 非空时限定目录（目录级对话/检索）。"""
+def _scope_filter(user_id: Optional[int], org_id: Optional[int],
+                  dir_id: Optional[int] = None) -> tuple[str, list]:
+    """隔离空间过滤片段（前置空格，拼接在 status 条件之后）。
+    personal 与 org 互斥：同时传两者是调用方编程错误，直接报错（防越权混查）。"""
+    if user_id is not None and org_id is not None:
+        raise ValueError("user_id 与 org_id 隔离空间互斥，不可同时指定")
+    sql, params = "", []
+    if org_id is not None:
+        sql += " AND uf.owner_type='org' AND uf.org_id=%s"
+        params.append(org_id)
+    elif user_id is not None:
+        sql += " AND uf.owner_type='personal' AND uf.user_id=%s"
+        params.append(user_id)
+    if dir_id is not None:
+        sql += " AND uf.dir_id=%s"
+        params.append(dir_id)
+    return sql, params
+
+
+def _vector_search(user_id: Optional[int], query: str, top_n: int = VECTOR_TOP_N,
+                   dir_id: Optional[int] = None,
+                   org_id: Optional[int] = None) -> List[dict]:
+    """向量召回：HNSW 余弦近邻，隔离空间+软删过滤；dir_id 非空时限定目录（目录级对话/检索）。"""
     qvec = get_embedder().encode_query(query)
     sql = (
         "SELECT c.id, c.file_id, uf.filename, c.chunk_type, c.content, "
         "c.heading_path, c.page_no, 1 - (c.embedding <=> %s::vector) AS sim "
         "FROM rag_chunk c JOIN user_file uf ON uf.id = c.file_id "
-        "WHERE uf.status=1 AND c.embedding IS NOT NULL ")
+        "WHERE uf.status=1 AND c.embedding IS NOT NULL")
     params: list = [qvec]
-    if user_id is not None:
-        sql += "AND uf.user_id=%s "
-        params.append(user_id)
-    if dir_id is not None:
-        sql += "AND uf.dir_id=%s "
-        params.append(dir_id)
-    sql += "ORDER BY c.embedding <=> %s::vector LIMIT %s"
+    scope_sql, scope_params = _scope_filter(user_id, org_id, dir_id)
+    sql += scope_sql
+    params += scope_params
+    sql += " ORDER BY c.embedding <=> %s::vector LIMIT %s"
     params += [qvec, top_n]
     with connect() as conn:
         register_vector(conn)
@@ -84,9 +103,10 @@ def _vector_search(user_id: int, query: str, top_n: int = VECTOR_TOP_N,
     return [dict(r) for r in rows]
 
 
-def _bm25_search(user_id: int, query: str, top_n: int = BM25_TOP_N,
-                 dir_id: Optional[int] = None) -> List[dict]:
-    """BM25 召回：全库块（同过滤）jieba 分词打分。文档文本含标题路径（标题词加权）。"""
+def _bm25_search(user_id: Optional[int], query: str, top_n: int = BM25_TOP_N,
+                 dir_id: Optional[int] = None,
+                 org_id: Optional[int] = None) -> List[dict]:
+    """BM25 召回：隔离空间内全量块（同过滤）jieba 分词打分。文档文本含标题路径（标题词加权）。"""
     import jieba
     from rank_bm25 import BM25Okapi
 
@@ -95,13 +115,8 @@ def _bm25_search(user_id: int, query: str, top_n: int = BM25_TOP_N,
         "c.heading_path, c.page_no "
         "FROM rag_chunk c JOIN user_file uf ON uf.id = c.file_id "
         "WHERE uf.status=1")
-    params: list = []
-    if user_id is not None:
-        sql += " AND uf.user_id=%s"
-        params.append(user_id)
-    if dir_id is not None:
-        sql += " AND uf.dir_id=%s"
-        params.append(dir_id)
+    scope_sql, params = _scope_filter(user_id, org_id, dir_id)
+    sql += scope_sql
     with connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     if not rows:
@@ -158,15 +173,17 @@ def _consensus(vec_rows: List[dict], bm25_rows: List[dict], fused: List[dict],
     return top_id in vec_ids and top_id in bm25_ids
 
 
-def retrieve(user_id: int, query: str, top_k: int = DEFAULT_TOP_K,
+def retrieve(user_id: Optional[int], query: str, top_k: int = DEFAULT_TOP_K,
              use_rerank: bool = True, dir_id: Optional[int] = None,
-             cascade: bool = False) -> List[RetrievedChunk]:
+             cascade: bool = False,
+             org_id: Optional[int] = None) -> List[RetrievedChunk]:
     """混合检索完整链路：向量 + BM25 → RRF 融合 → rerank 精排（异常降级）。
     dir_id 非空时限定目录（目录级对话的检索范围）。
+    org_id 非空时检索组织（社团）知识空间（双项目集成），与 user_id 互斥。
     cascade=True 且双通道共识命中 → 主动跳过精排（rerank_skipped=True，高置信），
     与降级（reranked=False，低置信）语义区分：调用方不可将级联跳过当低置信。"""
-    vec_rows = _vector_search(user_id, query, dir_id=dir_id)
-    bm25_rows = _bm25_search(user_id, query, dir_id=dir_id)
+    vec_rows = _vector_search(user_id, query, dir_id=dir_id, org_id=org_id)
+    bm25_rows = _bm25_search(user_id, query, dir_id=dir_id, org_id=org_id)
     fused = _rrf(vec_rows, bm25_rows)[:RERANK_TOP_N]
     if not fused:
         return []
