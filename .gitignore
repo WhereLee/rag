@@ -33,9 +33,6 @@ data/browser_upload/
 # VLM 解析缓存（按图片 hash 落盘，不入库）
 data/parsed/
 
-# 嵌套的 club 项目（独立仓库，不属本仓库）
-club-agent/
-
 # Java 构建产物
 rag-java/target/
 
